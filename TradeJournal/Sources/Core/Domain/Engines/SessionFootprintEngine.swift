@@ -6,8 +6,12 @@ import Foundation
 /// Configured strictly to GMT+7 (Bangkok/Hanoi/Jakarta) aligned with Asian, European, and US market sessions.
 public enum SessionFootprintEngine {
 
-    // Timezone GMT+7 for institutional session alignment
-    public static let sessionTimeZone: TimeZone = TimeZone(identifier: "Asia/Bangkok") ?? TimeZone(secondsFromGMT: 7 * 3600) ?? .current
+    // Native IANA Time Zones for exact market hours with automatic DST (Daylight Saving Time) handling
+    public static let tokyoTimeZone: TimeZone = TimeZone(identifier: "Asia/Tokyo") ?? TimeZone(secondsFromGMT: 9 * 3600) ?? .current
+    public static let londonTimeZone: TimeZone = TimeZone(identifier: "Europe/London") ?? TimeZone(secondsFromGMT: 0) ?? .current
+    public static let newYorkTimeZone: TimeZone = TimeZone(identifier: "America/New_York") ?? TimeZone(secondsFromGMT: -5 * 3600) ?? .current
+    public static let calendarTimeZone: TimeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? TimeZone(secondsFromGMT: 7 * 3600) ?? .current
+    public static let sessionTimeZone: TimeZone = calendarTimeZone
 
     // MARK: - 1. Tick Row Size Calculation across ALL Currency Pairs & Asset Classes
     public static func defaultRowSize(for symbol: String, samplePrice: Decimal? = nil) -> Decimal {
@@ -79,47 +83,102 @@ public enum SessionFootprintEngine {
         return Decimal(string: "0.0001") ?? Decimal(0.0001)
     }
 
-    // MARK: - 2. Session Time Intervals in GMT+7
-    /// Tokyo (Asia): 07:00 - 16:00 GMT+7
-    /// London (Europe): 14:00 - 23:00 GMT+7
-    /// New York (US): 19:00 - 04:00 GMT+7 (next day)
+    // MARK: - 2. Session Time Intervals Aligned to Native IANA Time Zones
+    /// Tokyo (Asia): 09:00 - 18:00 Asia/Tokyo
+    /// London (Europe): 08:00 - 17:00 Europe/London (DST automatically handled)
+    /// New York (US): 08:00 - 17:00 America/New_York (DST automatically handled)
+    /// Daily: Complete Asia-to-US institutional cycle (Tokyo Open 09:00 Tokyo to NY Close 17:00 NY)
+    /// Weekly: Monday Tokyo Open (09:00 Tokyo) to Friday New York Close (17:00 NY)
     public static func sessionInterval(
         for session: FootprintSessionType,
         on date: Date
     ) -> (start: Date, end: Date)? {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = sessionTimeZone
-
-        let startOfDay = cal.startOfDay(for: date)
-
         switch session {
         case .tokyo:
-            guard let s = cal.date(byAdding: .hour, value: 7, to: startOfDay),
-                  let e = cal.date(byAdding: .hour, value: 16, to: startOfDay) else { return nil }
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = tokyoTimeZone
+            let comps = cal.dateComponents([.year, .month, .day], from: date)
+            guard let dayStart = cal.date(from: comps),
+                  let s = cal.date(bySettingHour: 9, minute: 0, second: 0, of: dayStart),
+                  let e = cal.date(bySettingHour: 18, minute: 0, second: 0, of: dayStart) else { return nil }
             return (s, e)
 
         case .london:
-            guard let s = cal.date(byAdding: .hour, value: 14, to: startOfDay),
-                  let e = cal.date(byAdding: .hour, value: 23, to: startOfDay) else { return nil }
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = londonTimeZone
+            let comps = cal.dateComponents([.year, .month, .day], from: date)
+            guard let dayStart = cal.date(from: comps),
+                  let s = cal.date(bySettingHour: 8, minute: 0, second: 0, of: dayStart),
+                  let e = cal.date(bySettingHour: 17, minute: 0, second: 0, of: dayStart) else { return nil }
             return (s, e)
 
         case .newYork:
-            guard let s = cal.date(byAdding: .hour, value: 19, to: startOfDay),
-                  let nextDay = cal.date(byAdding: .day, value: 1, to: startOfDay),
-                  let e = cal.date(byAdding: .hour, value: 4, to: nextDay) else { return nil }
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = newYorkTimeZone
+            let comps = cal.dateComponents([.year, .month, .day], from: date)
+            guard let dayStart = cal.date(from: comps),
+                  let s = cal.date(bySettingHour: 8, minute: 0, second: 0, of: dayStart),
+                  let e = cal.date(bySettingHour: 17, minute: 0, second: 0, of: dayStart) else { return nil }
             return (s, e)
 
         case .daily:
-            guard let e = cal.date(byAdding: .day, value: 1, to: startOfDay) else { return nil }
-            return (startOfDay, e)
+            var tokyoCal = Calendar(identifier: .gregorian)
+            tokyoCal.timeZone = tokyoTimeZone
+            let tComps = tokyoCal.dateComponents([.year, .month, .day], from: date)
+            guard let tDayStart = tokyoCal.date(from: tComps),
+                  let proposedS = tokyoCal.date(bySettingHour: 9, minute: 0, second: 0, of: tDayStart) else { return nil }
+            let cycleDateComps: DateComponents
+            if date < proposedS, let priorDay = tokyoCal.date(byAdding: .day, value: -1, to: tDayStart) {
+                cycleDateComps = tokyoCal.dateComponents([.year, .month, .day], from: priorDay)
+            } else {
+                cycleDateComps = tComps
+            }
+            guard let cycleDayStart = tokyoCal.date(from: cycleDateComps),
+                  let s = tokyoCal.date(bySettingHour: 9, minute: 0, second: 0, of: cycleDayStart) else { return nil }
+
+            var nyCal = Calendar(identifier: .gregorian)
+            nyCal.timeZone = newYorkTimeZone
+            var nyComps = DateComponents()
+            nyComps.year = cycleDateComps.year
+            nyComps.month = cycleDateComps.month
+            nyComps.day = cycleDateComps.day
+            nyComps.hour = 17
+            nyComps.minute = 0
+            nyComps.second = 0
+            guard let e = nyCal.date(from: nyComps) else { return nil }
+            return (s, e)
 
         case .weekly:
-            let comp = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
-            guard let startOfWeek = cal.date(from: comp),
-                  let endOfWeek = cal.date(byAdding: .day, value: 7, to: startOfWeek) else { return nil }
-            return (startOfWeek, endOfWeek)
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = calendarTimeZone
+            var comp = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
+            comp.weekday = 2 // Monday
+            guard let monday = cal.date(from: comp) else { return nil }
+
+            var tokyoCal = Calendar(identifier: .gregorian)
+            tokyoCal.timeZone = tokyoTimeZone
+            let tComps = tokyoCal.dateComponents([.year, .month, .day], from: monday)
+            guard let tDayStart = tokyoCal.date(from: tComps),
+                  let s = tokyoCal.date(bySettingHour: 9, minute: 0, second: 0, of: tDayStart) else { return nil }
+
+            comp.weekday = 6 // Friday
+            guard let friday = cal.date(from: comp) else { return nil }
+            var nyCal = Calendar(identifier: .gregorian)
+            nyCal.timeZone = newYorkTimeZone
+            let nyComps = nyCal.dateComponents([.year, .month, .day], from: friday)
+            var nyEndComps = DateComponents()
+            nyEndComps.year = nyComps.year
+            nyEndComps.month = nyComps.month
+            nyEndComps.day = nyComps.day
+            nyEndComps.hour = 17
+            nyEndComps.minute = 0
+            nyEndComps.second = 0
+            guard let e = nyCal.date(from: nyEndComps) else { return nil }
+            return (s, e)
 
         case .monthly:
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = calendarTimeZone
             let comp = cal.dateComponents([.year, .month], from: date)
             guard let startOfMonth = cal.date(from: comp),
                   let endOfMonth = cal.date(byAdding: .month, value: 1, to: startOfMonth) else { return nil }
@@ -350,13 +409,28 @@ public enum SessionFootprintEngine {
             ))
         }
 
-        // 3. Completed Session Profiles (Prior Steps & Naked POCs)
+        // 3. Completed Session Profiles (4 Independent Retention Buckets)
+        // sessionSnapshots: 3 most recent sessions (1 Tokyo, 1 London, 1 New York)
+        // dailySnapshots: 10 most recent days
+        // weeklySnapshots: 3 most recent weeks
+        // higherSnapshots: None (No M/Q/Y)
         var ageMap: [FootprintSessionType: Int] = [:]
         for snap in snapshots.sorted(by: { $0.endTime > $1.endTime }) {
+            guard snap.sessionType != .monthly else { continue }
             let age = ageMap[snap.sessionType, default: 0] + 1
             ageMap[snap.sessionType] = age
 
-            // Age 1 is the immediate prior staircase step (mốc bậc thang gần nhất)
+            let maxKeep: Int = {
+                switch snap.sessionType {
+                case .daily: return 10
+                case .weekly: return 3
+                case .tokyo, .london, .newYork: return 1
+                case .monthly: return 0
+                }
+            }()
+            guard age <= maxKeep else { continue }
+
+            // Age 1 is the immediate prior staircase step
             if age == 1 {
                 let priorLabel = snap.isNaked
                     ? "Prior \(snap.sessionType.shortCode) POC [NPOC]"

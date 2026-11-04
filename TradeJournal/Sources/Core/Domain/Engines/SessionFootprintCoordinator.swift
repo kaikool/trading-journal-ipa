@@ -179,27 +179,6 @@ public final class SessionFootprintCoordinator: Sendable {
             }
         }
 
-        // Group bars by Monthly Profile in GMT+7
-        let monthGroups = Dictionary(grouping: bars) { bar -> String in
-            let c = cal.dateComponents([.year, .month], from: bar.date)
-            return "\(c.year ?? 0)-M\(c.month ?? 0)"
-        }
-        for (_, mBars) in monthGroups {
-            guard let firstDate = mBars.first?.date,
-                  let mInterval = SessionFootprintEngine.sessionInterval(for: .monthly, on: firstDate) else { continue }
-            let monthDateStr = SessionFootprintEngine.sessionDateString(for: mInterval.start)
-            if let snap = SessionFootprintEngine.computeProfile(
-                bars: mBars,
-                symbol: symbol,
-                sessionType: .monthly,
-                sessionDate: monthDateStr,
-                startTime: mInterval.start,
-                endTime: mInterval.end
-            ) {
-                result.append(snap)
-            }
-        }
-
         return result.sorted(by: { $0.endTime < $1.endTime })
     }
 
@@ -264,14 +243,16 @@ public final class SessionFootprintCoordinator: Sendable {
         }
 
         // 3. Developing Session (Tokyo / London / NY)
-        let hour = cal.component(.hour, from: now)
         let activeSession: FootprintSessionType? = {
-            if hour >= 7 && hour < 16 {
-                return .tokyo
-            } else if hour >= 14 && hour < 23 {
-                return .london
-            } else if hour >= 19 || hour < 4 {
+            if let ny = SessionFootprintEngine.sessionInterval(for: .newYork, on: now),
+               now >= ny.start && now <= ny.end {
                 return .newYork
+            } else if let ldn = SessionFootprintEngine.sessionInterval(for: .london, on: now),
+                      now >= ldn.start && now <= ldn.end {
+                return .london
+            } else if let tyo = SessionFootprintEngine.sessionInterval(for: .tokyo, on: now),
+                      now >= tyo.start && now <= tyo.end {
+                return .tokyo
             } else {
                 return nil
             }

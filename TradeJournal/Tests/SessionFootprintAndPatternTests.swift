@@ -3,34 +3,50 @@ import XCTest
 
 final class SessionFootprintAndPatternTests: XCTestCase {
     
-    // MARK: - 1. Test Session Intervals in GMT+7
-    func testSessionIntervalsGMT7() {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = SessionFootprintEngine.sessionTimeZone
+    // MARK: - 1. Test Session Intervals Aligned to Native IANA Time Zones
+    func testSessionIntervalsNativeIANATimeZones() {
+        var tokyoCal = Calendar(identifier: .gregorian)
+        tokyoCal.timeZone = SessionFootprintEngine.tokyoTimeZone
+
+        var londonCal = Calendar(identifier: .gregorian)
+        londonCal.timeZone = SessionFootprintEngine.londonTimeZone
+
+        var nyCal = Calendar(identifier: .gregorian)
+        nyCal.timeZone = SessionFootprintEngine.newYorkTimeZone
         
         let date = Date(timeIntervalSince1970: 1730700000) // Fixed point in time
         
         guard let tyo = SessionFootprintEngine.sessionInterval(for: .tokyo, on: date),
               let ldn = SessionFootprintEngine.sessionInterval(for: .london, on: date),
-              let ny = SessionFootprintEngine.sessionInterval(for: .newYork, on: date) else {
+              let ny = SessionFootprintEngine.sessionInterval(for: .newYork, on: date),
+              let daily = SessionFootprintEngine.sessionInterval(for: .daily, on: date) else {
             XCTFail("Failed to compute session intervals")
             return
         }
         
-        let tyoStartH = cal.component(.hour, from: tyo.start)
-        let tyoEndH = cal.component(.hour, from: tyo.end)
-        XCTAssertEqual(tyoStartH, 7)
-        XCTAssertEqual(tyoEndH, 16)
+        // Tokyo native: 09:00 - 18:00
+        let tyoStartH = tokyoCal.component(.hour, from: tyo.start)
+        let tyoEndH = tokyoCal.component(.hour, from: tyo.end)
+        XCTAssertEqual(tyoStartH, 9)
+        XCTAssertEqual(tyoEndH, 18)
         
-        let ldnStartH = cal.component(.hour, from: ldn.start)
-        let ldnEndH = cal.component(.hour, from: ldn.end)
-        XCTAssertEqual(ldnStartH, 14)
-        XCTAssertEqual(ldnEndH, 23)
+        // London native: 08:00 - 17:00 (DST handled)
+        let ldnStartH = londonCal.component(.hour, from: ldn.start)
+        let ldnEndH = londonCal.component(.hour, from: ldn.end)
+        XCTAssertEqual(ldnStartH, 8)
+        XCTAssertEqual(ldnEndH, 17)
         
-        let nyStartH = cal.component(.hour, from: ny.start)
-        let nyEndH = cal.component(.hour, from: ny.end)
-        XCTAssertEqual(nyStartH, 19)
-        XCTAssertEqual(nyEndH, 4)
+        // New York native: 08:00 - 17:00 (DST handled)
+        let nyStartH = nyCal.component(.hour, from: ny.start)
+        let nyEndH = nyCal.component(.hour, from: ny.end)
+        XCTAssertEqual(nyStartH, 8)
+        XCTAssertEqual(nyEndH, 17)
+
+        // Daily cycle: Starts at Tokyo Open (09:00 Tokyo), finalizes at NY Close (17:00 NY)
+        let dailyStartH = tokyoCal.component(.hour, from: daily.start)
+        let dailyEndH = nyCal.component(.hour, from: daily.end)
+        XCTAssertEqual(dailyStartH, 9)
+        XCTAssertEqual(dailyEndH, 17)
     }
 
     // MARK: - 2. Test Footprint Binning and 70% Value Area

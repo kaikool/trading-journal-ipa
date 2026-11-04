@@ -3,6 +3,40 @@ import SwiftUI
 // MARK: - Footprint Key Levels Overlay (TradingView Footprint Alignment)
 extension SharedChartCanvas {
 
+    private struct RightTagItem {
+        let y: CGFloat
+        let code: String
+        let color: Color
+    }
+
+    private struct ClusteredTag: Identifiable {
+        var id: String { "\(y)_\(text)" }
+        let y: CGFloat
+        let text: String
+        let color: Color
+    }
+
+    private static func clusterTags(_ tags: [RightTagItem]) -> [ClusteredTag] {
+        guard !tags.isEmpty else { return [] }
+        let sorted = tags.sorted { $0.y < $1.y }
+        var clusters: [(y: CGFloat, codes: [String], color: Color, count: Int)] = []
+
+        for tag in sorted {
+            if let idx = clusters.firstIndex(where: { abs($0.y - tag.y) <= 14 }) {
+                clusters[idx].codes.append(tag.code)
+                clusters[idx].count += 1
+                clusters[idx].y = (clusters[idx].y + tag.y) / 2.0
+            } else {
+                clusters.append((y: tag.y, codes: [tag.code], color: tag.color, count: 1))
+            }
+        }
+
+        return clusters.map { c in
+            let labelText = c.count > 1 ? "⚡ [\(c.codes.joined(separator: " | "))]" : "[\(c.codes[0])]"
+            return ClusteredTag(y: c.y, text: labelText, color: c.color)
+        }
+    }
+
     @ViewBuilder
     public static func footprintOverlay(
         bars: [MarketBar],
@@ -18,6 +52,19 @@ extension SharedChartCanvas {
         panOffset: CGFloat
     ) -> some View {
         let filteredProfiles = filteredTradingViewProfiles(sessionProfiles)
+        let rightTags = collectRightBorderTags(
+            bars: bars,
+            filteredProfiles: filteredProfiles,
+            developingProfiles: developingProfiles,
+            plotWidth: plotWidth,
+            plotHeight: plotHeight,
+            stepX: stepX,
+            minP: minP,
+            span: span,
+            panOffset: panOffset
+        )
+        let clusteredTags = clusterTags(rightTags)
+
         ZStack(alignment: .topLeading) {
             ForEach(filteredProfiles, id: \.snap.id) { item in
                 sessionProfileSegment(
@@ -58,7 +105,69 @@ extension SharedChartCanvas {
                 span: span,
                 panOffset: panOffset
             )
+
+            // Anti-Overlap Confluence Tags on Right Border
+            ForEach(clusteredTags) { cTag in
+                Text(cTag.text)
+                    .font(AppTypography.captionMicro)
+                    .foregroundColor(cTag.color)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(AppColors.cardBackground.opacity(0.85))
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .position(x: plotWidth - 34, y: cTag.y)
+            }
         }
+    }
+
+    private static func collectRightBorderTags(
+        bars: [MarketBar],
+        filteredProfiles: [(snap: SessionProfileSnapshot, tag: String)],
+        developingProfiles: [DevelopingProfile],
+        plotWidth: CGFloat,
+        plotHeight: CGFloat,
+        stepX: CGFloat,
+        minP: Double,
+        span: Double,
+        panOffset: CGFloat
+    ) -> [RightTagItem] {
+        var tags: [RightTagItem] = []
+
+        for item in filteredProfiles {
+            let snap = item.snap
+            let pocD = (snap.pocPrice as NSDecimalNumber).doubleValue
+            guard pocD >= (minP - span * 0.05) && pocD <= (minP + span * 1.05) else { continue }
+            let y = plotHeight - CGFloat((pocD - minP) / span) * plotHeight
+            let col = sessionColor(for: snap.sessionType)
+
+            let startIdx = bars.firstIndex(where: { $0.date >= snap.startTime })
+            let endIdx = bars.lastIndex(where: { $0.date <= snap.endTime })
+            if let sI = startIdx ?? (bars.first.map { snap.endTime >= $0.date ? 0 : nil } ?? nil) {
+                let eI = endIdx ?? min(bars.count - 1, sI)
+                if snap.isNaked {
+                    let rayEndIdx = findRayEndIndex(after: eI, for: snap.pocPrice, in: bars)
+                    let rayXEnd = CGFloat(rayEndIdx) * stepX + (stepX / 2.0) + panOffset
+                    if rayXEnd >= (plotWidth - 20) {
+                        tags.append(RightTagItem(y: max(8, min(plotHeight - 8, y)), code: item.tag, color: col))
+                    }
+                }
+            }
+        }
+
+        for dev in developingProfiles {
+            guard let curPoc = dev.currentPoc else { continue }
+            let pocD = (curPoc as NSDecimalNumber).doubleValue
+            guard pocD >= (minP - span * 0.05) && pocD <= (minP + span * 1.05) else { continue }
+            let y = plotHeight - CGFloat((pocD - minP) / span) * plotHeight
+            let col = sessionColor(for: dev.sessionType)
+            let x2 = CGFloat(max(0, bars.count - 1)) * stepX + (stepX / 2.0) + panOffset
+            if x2 >= 0 {
+                let devTag = dev.sessionType == .daily ? "D" : (dev.sessionType == .weekly ? "W" : (dev.sessionType == .tokyo ? "TYO" : (dev.sessionType == .london ? "LDN" : "NYC")))
+                tags.append(RightTagItem(y: max(8, min(plotHeight - 8, y)), code: devTag, color: col))
+            }
+        }
+
+        return tags
     }
 
     private static func filteredTradingViewProfiles(
@@ -71,15 +180,21 @@ extension SharedChartCanvas {
         let ny = sessionProfiles.filter { $0.sessionType == .newYork }.sorted { $0.startTime > $1.startTime }
 
         var list: [(SessionProfileSnapshot, String)] = []
-        for (idx, snap) in daily.prefix(3).enumerated() {
-            list.append((snap, idx == 0 ? "[D]" : "[D-\(idx)]"))
+        // 4 Independent Retention Buckets:
+        // dailySnapshots: 10 most recent days
+        for (idx, snap) in daily.prefix(10).enumerated() {
+            let code = idx == 0 ? "D-1" : "D-\(idx + 1)"
+            list.append((snap, code))
         }
-        for (idx, snap) in weekly.prefix(2).enumerated() {
-            list.append((snap, idx == 0 ? "[W]" : "[W-\(idx)]"))
+        // weeklySnapshots: 3 most recent weeks
+        for (idx, snap) in weekly.prefix(3).enumerated() {
+            let code = idx == 0 ? "W-1" : "W-\(idx + 1)"
+            list.append((snap, code))
         }
-        if let t = tokyo.first { list.append((t, "[TY]")) }
-        if let l = london.first { list.append((l, "[LD]")) }
-        if let n = ny.first { list.append((n, "[NY]")) }
+        // sessionSnapshots: 3 most recent sessions (1 Tokyo, 1 London, 1 New York)
+        if let t = tokyo.first { list.append((t, "TYO")) }
+        if let l = london.first { list.append((l, "LDN")) }
+        if let n = ny.first { list.append((n, "NYC")) }
         return list
     }
 
@@ -143,13 +258,6 @@ extension SharedChartCanvas {
                             path.addLine(to: CGPoint(x: min(plotWidth, rayXEnd), y: y))
                         }
                         .stroke(col.opacity(0.65), style: StrokeStyle(lineWidth: 1.0, dash: [2, 3]))
-
-                        if rayXEnd >= (plotWidth - 20) {
-                            Text(tag)
-                                .font(AppTypography.captionMicro)
-                                .foregroundColor(col)
-                                .position(x: plotWidth - 14, y: max(6, min(plotHeight - 6, y - 6)))
-                        }
                     }
                 }
             }
@@ -209,12 +317,6 @@ extension SharedChartCanvas {
                         }
                         .stroke(col.opacity(0.65), style: StrokeStyle(lineWidth: 1.0, dash: [2, 3]))
                     }
-
-                    let devTag = dev.sessionType == .daily ? "[D]" : (dev.sessionType == .weekly ? "[W]" : (dev.sessionType == .tokyo ? "[TKY]" : (dev.sessionType == .london ? "[LD]" : "[NY]")))
-                    Text(devTag)
-                        .font(AppTypography.captionMicro)
-                        .foregroundColor(col)
-                        .position(x: plotWidth - 14, y: max(6, min(plotHeight - 6, y - 6)))
                 }
             }
         }
