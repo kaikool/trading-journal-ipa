@@ -1,0 +1,189 @@
+import SwiftUI
+
+/// Standardized Apple HIG Account Card displaying status, broker badges, balance, and action controls
+public struct AccountCardView: View {
+    @ObservedObject private var dataStore = TradeDataStore.shared
+    public let account: Account
+    public let tradeCount: Int
+    public var onEdit: () -> Void
+    public var onDelete: () -> Void
+    
+    public init(
+        account: Account,
+        tradeCount: Int,
+        onEdit: @escaping () -> Void,
+        onDelete: @escaping () -> Void
+    ) {
+        self.account = account
+        self.tradeCount = tradeCount
+        self.onEdit = onEdit
+        self.onDelete = onDelete
+    }
+    
+    public var body: some View {
+        let isSelected = dataStore.selectedAccountId == account.id
+        let isArchived = account.archivedAt != nil
+        let isVisible = dataStore.isAccountVisible(account)
+        
+        TradeFormCardContainer {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    // Journal visibility toggle
+                    Image(systemName: isVisible ? "checkmark.circle.fill" : "circle")
+                        .font(AppTypography.displayMedium)
+                        .foregroundColor(isVisible ? AppColors.brand : AppColors.secondaryText)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            NativeHaptics.lightImpact()
+                            dataStore.toggleAccountVisibility(id: account.id)
+                        }
+                        .padding(.top, 2)
+                    
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(Formatters.cleanAccountName(account.name, balance: account.initialBalance))
+                                .font(AppTypography.rowPrimary)
+                                .foregroundColor(AppColors.primaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            
+                            if isSelected {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .foregroundColor(AppColors.profit)
+                                    .font(AppTypography.captionBold)
+                            }
+                        }
+                        
+                        Text("\(account.broker.isEmpty ? "Standard" : account.broker) · \(account.currency)")
+                            .font(AppTypography.rowSecondary)
+                            .foregroundColor(AppColors.secondaryText)
+                            .lineLimit(1)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard !isSelected else { return }
+                        NativeHaptics.selection()
+                        dataStore.selectAccount(id: account.id)
+                    }
+                    
+                    Spacer()
+                    
+                    if isSelected {
+                        AppBadge("Active", variant: .profit)
+                            .fixedSize()
+                    }
+                }
+                
+                // Badges
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        let prop = dataStore.propAccount(for: account)
+                        let isProp = dataStore.isPropAccount(account)
+                        
+                        if isArchived {
+                            badgeView("Archived", color: AppColors.secondaryText)
+                        } else if isProp {
+                            if let p = prop {
+                                switch p.status {
+                                case .active:
+                                    badgeView("Active", color: AppColors.profit)
+                                case .passed:
+                                    badgeView("Passed", color: AppColors.brand)
+                                case .breached:
+                                    badgeView("Breached", color: AppColors.loss)
+                                case .closed:
+                                    badgeView("Closed", color: AppColors.secondaryText)
+                                case .inactive:
+                                    badgeView("Inactive", color: AppColors.secondaryText)
+                                }
+                            } else {
+                                if dataStore.isAccountActive(account) {
+                                    badgeView("Active", color: AppColors.profit)
+                                } else {
+                                    badgeView("Inactive", color: AppColors.secondaryText)
+                                }
+                            }
+                        } else {
+                            badgeView("Active", color: AppColors.profit)
+                        }
+                        
+                        // Prop Program / Phase badge
+                        if let prog = prop?.program.label ?? account.propProgram?.capitalized, !prog.isEmpty {
+                            badgeView(prog, color: AppColors.brand)
+                        }
+                        
+                        if !account.broker.isEmpty {
+                            badgeView(account.broker, color: AppColors.brand)
+                        }
+                        
+                        badgeView(account.kind.rawValue.uppercased(), color: AppColors.secondaryText)
+                        badgeView(account.profitCalcMethod.rawValue.uppercased(), color: AppColors.secondaryText)
+                        
+                        if account.autoSync {
+                            badgeView("Auto-sync", color: AppColors.profit)
+                        }
+                    }
+                }
+                
+                Divider().background(AppColors.border.opacity(0.5))
+                
+                // Balance and Trades Info
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Initial Balance")
+                            .font(AppTypography.statLabel)
+                            .foregroundColor(AppColors.secondaryText)
+                            .lineLimit(1)
+                        Text(Formatters.formatCurrency(account.initialBalance, currency: account.currency))
+                            .font(AppTypography.statValue)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .foregroundColor(AppColors.primaryText)
+                    }
+                    
+                    Spacer()
+                    
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("Total Trades")
+                            .font(AppTypography.statLabel)
+                            .foregroundColor(AppColors.secondaryText)
+                            .lineLimit(1)
+                        Text("\(tradeCount) trades")
+                            .font(AppTypography.statValue)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .foregroundColor(AppColors.primaryText)
+                    }
+                }
+                
+                Divider().background(AppColors.border.opacity(0.5))
+                
+                // Action row
+                HStack(spacing: 12) {
+                    AppToggleRow("Auto-sync", isOn: Binding(
+                        get: { account.autoSync },
+                        set: { _ in dataStore.toggleAccountAutoSync(id: account.id) }
+                    ))
+                    
+                    Spacer()
+                    
+                    // Actions
+                    HStack(spacing: 8) {
+                        ModalIconButton(icon: "pencil", color: AppColors.secondaryText, label: "Edit account", action: onEdit)
+                        ModalIconButton(icon: isArchived ? "tray.and.arrow.down" : "tray.and.arrow.up", color: AppColors.secondaryText, label: isArchived ? "Restore account" : "Archive account") {
+                            dataStore.archiveAccount(id: account.id, archived: !isArchived)
+                        }
+                        ModalDeleteButton(action: onDelete)
+                    }
+                }
+            }
+        }
+        .opacity(isArchived ? 0.65 : 1.0)
+    }
+    
+    private func badgeView(_ text: String, color: Color) -> some View {
+        AppBadge(text, color: color)
+    }
+}

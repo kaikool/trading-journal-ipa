@@ -1,0 +1,598 @@
+import Foundation
+import Combine
+
+// MARK: - Trades, Executions & Reconstruction Extension
+extension TradeDataStore {
+    
+    public var filteredTrades: [Trade] {
+        if let cached = _cachedFilteredTrades,
+           _cachedFilteredTradesAccountId == selectedAccountId {
+            return cached
+        }
+        let result: [Trade]
+        if selectedAccountId == "all" || selectedAccountId == "default-acc" || selectedAccountId.isEmpty {
+            let visibleIds = visibleAccountIds
+            result = trades.filter { trade in
+                if trade.symbol == "ACCOUNT" { return false }
+                if visibleIds.contains(trade.accountId) { return true }
+                let clean = trade.accountId.cleanAccountId
+                if visibleIds.contains(clean) ||
+                   visibleIds.contains(trade.accountId.the5ersCanonicalId) ||
+                   visibleIds.contains(trade.accountId.ctraderCanonicalId) ||
+                   visibleIds.contains(trade.accountId.exnessCanonicalId) {
+                    return true
+                }
+                return false
+            }
+        } else {
+            let selId = selectedAccountId
+            result = trades.filter { trade in
+                guard trade.symbol != "ACCOUNT" else { return false }
+                return trade.accountId == selId || TradeDataStore.isSameAccountId(trade.accountId, selId)
+            }
+        }
+        _cachedFilteredTrades = result
+        _cachedFilteredTradesAccountId = selectedAccountId
+        return result
+    }
+    
+    public var existingHashesForSelectedAccount: Set<String> {
+        Set(executions.filter { $0.accountId == selectedAccountId }.map { $0.contentHash })
+    }
+    
+    /// Currency of every known account, keyed by account id.
+    /// Used to convert balances into the reporting currency when accounts are aggregated.
+    public var accountCurrencyMap: [String: String] {
+        var map: [String: String] = [:]
+        for account in accounts {
+            map[account.id] = account.currency.uppercased()
+            map[account.id.cleanAccountId] = account.currency.uppercased()
+        }
+        return map
+    }
+    
+    /// Applies new conversion settings and rebuilds the round trips so that the trade P&L,
+    /// balances and reports all use the same currency.
+    public func applyCurrencyConversion(_ conversion: CurrencyConversion) {
+        guard conversion != currencyConversion else { return }
+        currencyConversion = conversion
+        rebuildAllAccounts(forceRebuildTrades: true)
+        saveToDisk(immediate: true)
+    }
+    
+    /// Currency the given account reports commissions and swap in.
+    public func accountCurrency(for accountId: String) -> String {
+        if let account = accounts.first(where: { $0.id == accountId }) {
+            return account.currency.uppercased()
+        }
+        if let account = accounts.first(where: { $0.id.cleanAccountId == accountId.cleanAccountId }) {
+            return account.currency.uppercased()
+        }
+        return currencyConversion.reportingCurrency
+    }
+    
+    /// Imports new fills for an account and triggers reconstruction
+    public func importExecutions(accountId: String, newExecutions: [Execution]) {
+        let existingIds = Set(executions.map { $0.id })
+        let existingHashes = executionHashes.union(executions.map { $0.contentHash })
+        
+        let uniqueNew = newExecutions.filter { fill in
+            if existingIds.contains(fill.id) || existingHashes.contains(fill.contentHash) {
+                return false
+            }
+            // Check semantic duplicate in existing executions
+            let semantic = TradeDeduplicator.executionSemanticKey(for: fill)
+            let isDuplicate = executions.contains { existing in
+                TradeDeduplicator.executionSemanticKey(for: existing) == semantic
+            }
+            return !isDuplicate
+        }
+        
+        guard !uniqueNew.isEmpty else {
+            AppLogger.info("No new unique executions to import.")
+            if trades.filter({ $0.accountId == accountId }).isEmpty && !executions.filter({ $0.accountId == accountId }).isEmpty {
+                rebuildAccount(accountId: accountId)
+                deduplicateTrades()
+                invalidatePerformanceCaches()
+                saveToDisk(immediate: true)
+                objectWillChange.send()
+            }
+            return
+        }
+        
+        for fill in uniqueNew {
+            executionHashes.insert(fill.contentHash)
+            executions.append(fill)
+        }
+        
+        deduplicateExecutions()
+        rebuildAccount(accountId: accountId)
+        deduplicateTrades()
+        saveToDisk(immediate: true)
+        AppLogger.info("Imported \(uniqueNew.count) executions for account \(accountId). Rebuilt \(trades.count) trades.")
+    }
+    
+    /// Deduplicates executions by ID, contentHash, and semantic execution attributes
+    public func deduplicateExecutions() {
+        let cleaned = TradeDeduplicator.deduplicate(executions)
+        if cleaned.count != executions.count {
+            AppLogger.info("Deduplicated executions from \(executions.count) down to \(cleaned.count)")
+            self.executions = cleaned
+            self.executionHashes = Set(cleaned.map { $0.contentHash })
+        }
+    }
+    
+    /// Deduplicates trades by key, and by semantic signature (account, symbol, direction, open time, quantity)
+    public func deduplicateTrades() {
+        let cleaned = TradeDeduplicator.deduplicate(trades)
+
+        if cleaned.count != trades.count {
+            AppLogger.info("Deduplicated trades from \(trades.count) down to \(cleaned.count)")
+            self.trades = cleaned
+            invalidatePerformanceCaches()
+        }
+        healAndSanitizeAllTrades()
+    }
+
+    /// Universal invariant auto-healing: Scans all trades in memory.
+    /// 1. If netPnl == 0 but entry and exit price are valid, recalculates contract P&L via AssetContractEngine.
+    /// 2. If netPnl > 0 and status != .win, restores status to .win.
+    /// 3. If netPnl < 0 and status != .loss, restores status to .loss.
+    /// 4. Synchronizes healed trades to persistent storage and Supabase in background without losing any user notes, tags, or playbooks.
+    public func healAndSanitizeAllTrades() {
+        var mutated = false
+        var healedTradesToSync: [Trade] = []
+
+        for i in 0..<trades.count {
+            if trades[i].status.isClosed {
+                if trades[i].netPnl == 0, let exitP = trades[i].avgExit, exitP > 0, trades[i].avgEntry > 0 {
+                    let calcPnl = AssetContractEngine.calculateGrossPnl(
+                        symbol: trades[i].symbol,
+                        direction: trades[i].direction,
+                        quantity: trades[i].quantity,
+                        entryPrice: trades[i].avgEntry,
+                        exitPrice: exitP
+                    )
+                    if calcPnl != 0 {
+                        trades[i].grossPnl = calcPnl
+                        trades[i].netPnl = calcPnl
+                        mutated = true
+                    }
+                }
+
+                let correctStatus: TradeStatus = trades[i].netPnl > 0 ? .win : (trades[i].netPnl < 0 ? .loss : .breakeven)
+                if trades[i].status != correctStatus {
+                    trades[i].status = correctStatus
+                    mutated = true
+                    healedTradesToSync.append(trades[i])
+                }
+            }
+        }
+
+        if mutated {
+            AppLogger.info("Universal Auto-Healing repaired \(healedTradesToSync.count) trades.")
+            invalidatePerformanceCaches()
+            saveToDisk()
+
+            if !healedTradesToSync.isEmpty && SupabaseService.shared.isConfigured {
+                Task {
+                    _ = try? await SupabaseService.shared.upsertTrades(healedTradesToSync)
+                }
+            }
+        }
+    }
+    
+    /// Reconstructs round trips from raw executions using account profit calculation method
+    public func rebuildAccount(accountId: String) {
+        guard let account = accounts.first(where: { $0.id == accountId }) else { return }
+        
+        let accountFills = executions.filter { $0.accountId == accountId }
+        
+        // Native The5ers MCP accounts store reported positions directly as round trips and do not use atomic execution reconstruction.
+        // Accounts with atomic executions (such as cTrader accounts even under The5ers broker) MUST rebuild round trips!
+        if accountId.hasPrefix("the5ers_") && !accountId.hasPrefix("ctrader_") {
+            return
+        }
+        // Direct Exness broker-synced trades (with authoritative broker-reported profit) take precedence:
+        if accountId.hasPrefix("exness_") && trades.contains(where: { $0.accountId == accountId && $0.key.hasPrefix("exness_") }) {
+            return
+        }
+        
+        let reconstructed = TradeReconstructionEngine.buildRoundTrips(
+            executions: accountFills,
+            options: .init(
+                method: account.profitCalcMethod,
+                multipliers: multipliers,
+                context: currencyConversion.context,
+                accountCurrency: account.currency.uppercased(),
+                defaults: defaults
+            )
+        )
+        
+        // Preserve existing user annotations (notes, tags, mistakes, ratings, risk levels) across rebuilds
+        var existingAnnotations: [String: (notes: String?, tags: [String], mistakes: [String], rating: Int?, stopLoss: Decimal?, profitTarget: Decimal?, reviewedAt: Date?, playbookId: String?)] = [:]
+        for t in trades where t.accountId == accountId {
+            existingAnnotations[t.key] = (t.notes, t.tags, t.mistakes, t.rating, t.stopLoss, t.profitTarget, t.reviewedAt, t.playbookId)
+        }
+        
+        let mergedTrades = reconstructed.map { trade -> Trade in
+            var t = trade
+            if let ann = existingAnnotations[t.key] {
+                t.notes = ann.notes
+                t.tags = ann.tags
+                t.mistakes = ann.mistakes
+                t.rating = ann.rating
+                t.stopLoss = ann.stopLoss
+                t.profitTarget = ann.profitTarget
+                t.reviewedAt = ann.reviewedAt
+                t.playbookId = (ann.playbookId?.isEmpty ?? true) ? defaultPlaybook?.id : ann.playbookId
+            } else {
+                let defaultRisk = JournalDefaultsEngine.defaultRisk(
+                    entry: t.avgEntry,
+                    direction: t.direction,
+                    accountId: accountId,
+                    symbol: t.symbol,
+                    defaults: defaults
+                )
+                if t.stopLoss == nil { t.stopLoss = defaultRisk.stopLoss }
+                if t.profitTarget == nil { t.profitTarget = defaultRisk.profitTarget }
+                if t.playbookId == nil { t.playbookId = defaultPlaybook?.id }
+            }
+            return t
+        }
+        
+        // Invariant Defense: Explicitly preserve broker-synced trades for this account that are not built from atomic fills
+        let fillIds = Set(accountFills.map(\.id))
+        var brokerSyncedTrades = trades.filter { trade in
+            trade.accountId == accountId && (
+                trade.key.hasPrefix("the5ers_") ||
+                trade.key.hasPrefix("exness_") ||
+                trade.executionIds.isEmpty ||
+                !trade.executionIds.contains(where: { fillIds.contains($0) })
+            )
+        }
+        if let defPbId = defaultPlaybook?.id {
+            for i in 0..<brokerSyncedTrades.count {
+                if brokerSyncedTrades[i].playbookId == nil || brokerSyncedTrades[i].playbookId?.isEmpty == true {
+                    brokerSyncedTrades[i].playbookId = defPbId
+                }
+            }
+        }
+        let otherTrades = trades.filter { $0.accountId != accountId }
+        trades = otherTrades + brokerSyncedTrades + mergedTrades
+        invalidatePerformanceCaches()
+    }
+    
+    public func rebuildAllAccounts(forceRebuildTrades: Bool = false) {
+        deduplicateAndCleanAccounts()
+        deduplicateExecutions()
+        deduplicateTrades()
+        reconcileReceiptsToEntries()
+        deduplicatePropEntries()
+        deduplicatePropReceipts()
+        var localAccounts = accounts
+        var accountsModified = false
+        for i in 0..<localAccounts.count {
+            let cleaned = Formatters.cleanAccountName(localAccounts[i].name, balance: localAccounts[i].initialBalance)
+            if localAccounts[i].name != cleaned {
+                localAccounts[i].name = cleaned
+                accountsModified = true
+            }
+        }
+        if accountsModified {
+            accounts = localAccounts
+        }
+        var localPropAccounts = propAccounts
+        var propAccountsModified = false
+        for i in 0..<localPropAccounts.count {
+            let sizeBal = localPropAccounts[i].sizeMinor.map { Decimal($0) / 100 }
+            let cleaned = Formatters.cleanAccountName(localPropAccounts[i].name, balance: sizeBal)
+            if localPropAccounts[i].name != cleaned {
+                localPropAccounts[i].name = cleaned
+                propAccountsModified = true
+            }
+        }
+        if propAccountsModified {
+            propAccounts = localPropAccounts
+        }
+        let needsTradeRebuild = forceRebuildTrades || (trades.isEmpty && !executions.isEmpty) || accounts.contains(where: { acc in
+            trades.filter({ $0.accountId == acc.id }).isEmpty && !executions.filter({ $0.accountId == acc.id }).isEmpty
+        })
+        if needsTradeRebuild {
+            for acc in accounts {
+                rebuildAccount(accountId: acc.id)
+            }
+        }
+        deduplicateTrades()
+        invalidatePerformanceCaches()
+        saveToDisk()
+        objectWillChange.send()
+    }
+    
+    public func updateTradeAnnotations(
+        key: String,
+        notes: String?,
+        tags: [String],
+        mistakes: [String] = [],
+        stopLoss: Decimal?,
+        profitTarget: Decimal? = nil,
+        rating: Int?,
+        playbookId: String? = nil,
+        reviewedAt: Date? = nil
+    ) {
+        guard let index = trades.firstIndex(where: { $0.key == key }) else { return }
+        trades[index].notes = notes
+        trades[index].tags = tags
+        trades[index].mistakes = mistakes
+        trades[index].stopLoss = stopLoss
+        trades[index].profitTarget = profitTarget
+        trades[index].rating = rating
+        trades[index].playbookId = playbookId
+        trades[index].reviewedAt = reviewedAt
+        saveToDisk()
+        AppLogger.info("Updated trade annotations for key: \(key)")
+    }
+    
+    public func updateTradeExcursions(
+        key: String,
+        mae: Decimal?,
+        mfe: Decimal?,
+        maePoints: Decimal? = nil,
+        mfePoints: Decimal? = nil
+    ) {
+        guard let index = trades.firstIndex(where: { $0.key == key }) else { return }
+        if trades[index].mae == mae && trades[index].mfe == mfe && trades[index].maePoints == maePoints && trades[index].mfePoints == mfePoints {
+            return
+        }
+        trades[index].mae = mae
+        trades[index].mfe = mfe
+        trades[index].maePoints = maePoints
+        trades[index].mfePoints = mfePoints
+        saveToDisk()
+        let updatedTrade = trades[index]
+        Task {
+            try? await SupabaseService.shared.upsertTrades([updatedTrade])
+        }
+        AppLogger.info("Updated trade excursions for \(key): MAE=\(mae ?? 0), MFE=\(mfe ?? 0)")
+    }
+    
+    public func addManualTrade(
+        accountId: String,
+        symbol: String,
+        direction: TradeDirection,
+        quantity: Decimal,
+        entryPrice: Decimal,
+        exitPrice: Decimal?,
+        openedAt: Date,
+        closedAt: Date?,
+        fee: Decimal = 0,
+        notes: String? = nil,
+        tags: [String] = [],
+        mistakes: [String] = [],
+        rating: Int? = nil,
+        stopLoss: Decimal? = nil,
+        profitTarget: Decimal? = nil,
+        playbookId: String? = nil,
+        ruleAssessments: [String: Bool] = [:]
+    ) {
+        let cleanSymbol = symbol.uppercased().trimmingCharacters(in: .whitespaces)
+        let entrySide: ExecutionSide = (direction == .long) ? .buy : .sell
+        let halfFee = (exitPrice != nil) ? (fee / 2) : fee
+        
+        let entryFill = Execution(
+            accountId: accountId,
+            symbol: cleanSymbol,
+            side: entrySide,
+            quantity: quantity,
+            price: entryPrice,
+            fee: halfFee,
+            executedAt: openedAt,
+            source: "manual"
+        )
+        
+        var newExecutions = [entryFill]
+        
+        if let exitP = exitPrice {
+            let exitSide: ExecutionSide = (direction == .long) ? .sell : .buy
+            let exitTime = closedAt ?? openedAt.addingTimeInterval(3600)
+            let exitFill = Execution(
+                accountId: accountId,
+                symbol: cleanSymbol,
+                side: exitSide,
+                quantity: quantity,
+                price: exitP,
+                fee: halfFee,
+                executedAt: exitTime,
+                source: "manual"
+            )
+            newExecutions.append(exitFill)
+        }
+        
+        for fill in newExecutions {
+            executionHashes.insert(fill.contentHash)
+            executions.append(fill)
+        }
+        
+        rebuildAccount(accountId: accountId)
+        
+        if let idx = trades.firstIndex(where: { t in
+            t.accountId == accountId &&
+            t.symbol == cleanSymbol &&
+            abs(t.openedAt.timeIntervalSince(openedAt)) < 2
+        }) {
+            trades[idx].notes = notes
+            trades[idx].tags = tags
+            trades[idx].mistakes = mistakes
+            trades[idx].rating = rating
+            trades[idx].stopLoss = stopLoss
+            trades[idx].profitTarget = profitTarget
+            let effectivePlaybookId = (playbookId?.isEmpty ?? true) ? defaultPlaybook?.id : playbookId
+            trades[idx].playbookId = effectivePlaybookId
+            
+            if let pbId = effectivePlaybookId, !ruleAssessments.isEmpty {
+                let tradeKey = trades[idx].key
+                for (rule, followed) in ruleAssessments {
+                    let assessment = PlaybookRuleAssessment(
+                        tradeKey: tradeKey,
+                        playbookId: pbId,
+                        rule: rule,
+                        followed: followed
+                    )
+                    if let aIdx = playbookAssessments.firstIndex(where: { $0.id == assessment.id }) {
+                        playbookAssessments[aIdx] = assessment
+                    } else {
+                        playbookAssessments.append(assessment)
+                    }
+                }
+            }
+        }
+        
+        saveToDisk(immediate: true)
+        AppLogger.info("Added manual trade for \(cleanSymbol). Total trades now: \(trades.count)")
+        SyncManager.shared.scheduleBackgroundCloudBackup(delaySeconds: 5)
+    }
+    
+    public func deleteTrade(key: String) {
+        guard let trade = trades.first(where: { $0.key == key }) else { return }
+        let idsToDelete = Set(trade.executionIds)
+        
+        let deletedFills = executions.filter { idsToDelete.contains($0.id) }
+        for fill in deletedFills {
+            executionHashes.remove(fill.contentHash)
+        }
+        executions.removeAll { idsToDelete.contains($0.id) }
+        
+        // Invariant: Explicitly purge the trade from in-memory collection regardless of account type
+        trades.removeAll { $0.key == key }
+        
+        if !trade.accountId.hasPrefix("the5ers_") || trade.accountId.hasPrefix("ctrader_") {
+            rebuildAccount(accountId: trade.accountId)
+        }
+        MarketDataCacheStore.shared.invalidateTrade(tradeId: key)
+        AICoachSessionStore.shared.clear(key: key)
+        saveToDisk(immediate: true)
+        AppLogger.info("Deleted trade \(key), remaining trades: \(trades.count)")
+        Task {
+            try? await SupabaseService.shared.deleteTrade(key: key)
+        }
+    }
+
+    public func updateManualTrade(
+        key: String,
+        symbol: String,
+        direction: TradeDirection,
+        quantity: Decimal,
+        entryPrice: Decimal,
+        exitPrice: Decimal?,
+        openedAt: Date,
+        closedAt: Date?,
+        fee: Decimal = 0,
+        notes: String? = nil,
+        tags: [String] = [],
+        mistakes: [String] = [],
+        rating: Int? = nil,
+        stopLoss: Decimal? = nil,
+        profitTarget: Decimal? = nil,
+        playbookId: String? = nil
+    ) {
+        guard let trade = trades.first(where: { $0.key == key }) else { return }
+        let accId = trade.accountId
+        let account = accounts.first(where: { $0.id == accId })
+        let isSyncedAccount = accId.hasPrefix("the5ers_") || (account?.kind == .sync)
+        
+        // Critical Defense: If this trade belongs to a synced broker account (such as The5ers or cTrader sync),
+        // NEVER synthesize manual execution fills or trigger account rebuild!
+        // Instead, update the trade annotations in-place.
+        if isSyncedAccount {
+            updateTradeAnnotations(
+                key: key,
+                notes: notes,
+                tags: tags,
+                mistakes: mistakes,
+                stopLoss: stopLoss,
+                profitTarget: profitTarget,
+                rating: rating,
+                playbookId: playbookId,
+                reviewedAt: Date()
+            )
+            return
+        }
+        
+        let oldIds = Set(trade.executionIds)
+        let oldFills = executions.filter { oldIds.contains($0.id) }
+        for fill in oldFills {
+            executionHashes.remove(fill.contentHash)
+        }
+        executions.removeAll { oldIds.contains($0.id) }
+        
+        let cleanSymbol = symbol.uppercased().trimmingCharacters(in: .whitespaces)
+        let entrySide: ExecutionSide = (direction == .long) ? .buy : .sell
+        let halfFee = (exitPrice != nil) ? (fee / 2) : fee
+        
+        let entryFill = Execution(
+            accountId: accId,
+            symbol: cleanSymbol,
+            side: entrySide,
+            quantity: quantity,
+            price: entryPrice,
+            fee: halfFee,
+            executedAt: openedAt,
+            source: "manual"
+        )
+        var newExecutions = [entryFill]
+        
+        if let exitP = exitPrice {
+            let exitSide: ExecutionSide = (direction == .long) ? .sell : .buy
+            let exitTime = closedAt ?? openedAt.addingTimeInterval(3600)
+            let exitFill = Execution(
+                accountId: accId,
+                symbol: cleanSymbol,
+                side: exitSide,
+                quantity: quantity,
+                price: exitP,
+                fee: halfFee,
+                executedAt: exitTime,
+                source: "manual"
+            )
+            newExecutions.append(exitFill)
+        }
+        
+        for fill in newExecutions {
+            executionHashes.insert(fill.contentHash)
+            executions.append(fill)
+        }
+        
+        rebuildAccount(accountId: accId)
+        
+        var updatedKey = key
+        if let idx = trades.firstIndex(where: { t in
+            t.accountId == accId &&
+            t.symbol == cleanSymbol &&
+            abs(t.openedAt.timeIntervalSince(openedAt)) < 2
+        }) {
+            trades[idx].notes = notes
+            trades[idx].tags = tags
+            trades[idx].mistakes = mistakes
+            trades[idx].rating = rating
+            trades[idx].stopLoss = stopLoss
+            trades[idx].profitTarget = profitTarget
+            trades[idx].playbookId = playbookId
+            updatedKey = trades[idx].key
+        }
+        
+        saveToDisk(immediate: true)
+        MarketDataCacheStore.shared.invalidateTrade(tradeId: key)
+        AICoachSessionStore.shared.clear(key: key)
+        if updatedKey != key {
+            MarketDataCacheStore.shared.invalidateTrade(tradeId: updatedKey)
+            AICoachSessionStore.shared.clear(key: updatedKey)
+        }
+        AppLogger.info("Updated manual trade for \(cleanSymbol). Total trades now: \(trades.count)")
+        if updatedKey != key {
+            Task {
+                try? await SupabaseService.shared.deleteTrade(key: key)
+            }
+        }
+        SyncManager.shared.scheduleBackgroundCloudBackup(delaySeconds: 5)
+    }
+}

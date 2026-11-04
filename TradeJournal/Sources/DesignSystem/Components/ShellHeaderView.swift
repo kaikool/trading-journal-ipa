@@ -1,0 +1,460 @@
+import SwiftUI
+
+/// Unified Modern Top Navigation Bar conforming to Apple Human Interface Guidelines:
+/// - Brand logo emblem button as the primary drawer navigation trigger
+/// - Clean, confident page identity title (18pt bold rounded typography)
+/// - Quick AI Scanner action button for instant pre-trade analysis from any screen
+/// - Sleek, understated Apple background with hairline bottom separator
+public struct ShellHeaderView: View {
+    @EnvironmentObject private var env: AppEnvironment
+    @ObservedObject private var dataStore = TradeDataStore.shared
+    
+    @State private var showPreTradeAnalysis: Bool = false
+    @State private var showAiReflection: Bool = false
+    @State private var showNotificationCenter: Bool = false
+    
+    public init() {}
+    
+    private var currentTabTitle: String {
+        switch env.selectedTab {
+        case .dashboard: return "Dashboard"
+        case .calendar: return "Calendar"
+        case .journal: return "Daily Journal"
+        case .trades: return "Trades"
+        case .reports: return "Analytics"
+        case .propFirms: return "Prop Firms"
+        case .notebook: return "Notebook"
+        case .playbooks: return "Playbooks"
+        case .progress: return "Progress"
+        case .missed: return "Missed Trades"
+        case .importTrades: return "Import Trades"
+        case .accounts: return "Accounts"
+        case .settings: return "Settings"
+        }
+    }
+    
+    public var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                // Leading: App Brand Logo Button as Drawer Menu Trigger
+                Button {
+                    NativeHaptics.lightImpact()
+                    withAnimation(AppAnimations.springStandard) {
+                        env.isDrawerOpen.toggle()
+                    }
+                } label: {
+                    LogoMarkView(size: 26)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(ApplePressableButtonStyle())
+                .accessibilityLabel("Open navigation menu")
+                
+                // Current Page Title: Clean rounded typography
+                Text(currentTabTitle)
+                    .font(AppTypography.pageHeroTitle)
+                    .foregroundColor(AppColors.primaryText)
+                    .lineLimit(1)
+                
+                Spacer(minLength: 6)
+                
+                // Dynamic Trailing Actions by Page Purpose
+                trailingActionSlot
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .frame(minHeight: 50)
+            
+            // Row 2: Dynamic Sub-Bar Slot (Seamlessly inside the same frosted glass container)
+            if hasSubBar {
+                subBarSlot
+            }
+            
+            // Row 3: Collapsible In-Header Search Bar (Expands smoothly on demand)
+            if env.isSearchActive && hasSearchCapability {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(AppTypography.captionBold)
+                        .foregroundColor(AppColors.secondaryText)
+                    TextField("Search...", text: $env.searchQuery)
+                        .font(AppTypography.formInput)
+                        .foregroundColor(AppColors.primaryText)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    if !env.searchQuery.isEmpty {
+                        Button {
+                            env.searchQuery = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.secondaryText)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 36)
+                .background(AppColors.secondaryBackground.opacity(0.85))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule().stroke(AppColors.border.opacity(0.9), lineWidth: 1.0)
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(AppColors.border.opacity(0.35))
+                .frame(height: 0.5)
+        }
+        .sheet(isPresented: $showPreTradeAnalysis) {
+            PreTradeAnalysisSheet(initialSymbol: "XAUUSD")
+        }
+        .sheet(isPresented: $showAiReflection) {
+            AIReflectionView()
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .sheet(isPresented: $showNotificationCenter) {
+            NotificationCenterSheet()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+    
+    private var hasSubBar: Bool {
+        switch env.selectedTab {
+        case .settings, .reports, .propFirms, .notebook, .calendar, .accounts:
+            return true
+        default:
+            return false
+        }
+    }
+    
+    // MARK: - Sub-Bar Slots (100% Unified Translucency)
+    
+    @ViewBuilder
+    private var subBarSlot: some View {
+        switch env.selectedTab {
+        case .calendar:
+            calendarMonthSubBar
+        case .settings:
+            settingsSegmentedSubBar
+        case .reports:
+            reportsSegmentedSubBar
+        case .accounts:
+            accountsSegmentedSubBar
+        case .propFirms:
+            propFirmsSegmentedSubBar
+        case .notebook:
+            notebookFoldersSubBar
+        default:
+            EmptyView()
+        }
+    }
+    
+    private var calendarMonthSubBar: some View {
+        HStack {
+            Button {
+                NativeHaptics.lightImpact()
+                env.changeCalendarMonth(by: -1)
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(AppTypography.actionButtonCompact)
+                    .foregroundColor(AppColors.primaryText)
+                    .frame(width: 32, height: 32)
+                    .background(AppColors.secondaryBackground.opacity(0.75))
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(AppColors.border.opacity(0.6), lineWidth: 0.5))
+            }
+            .buttonStyle(ApplePressableButtonStyle())
+            .accessibilityLabel("Previous month")
+            
+            Spacer()
+            
+            HStack(spacing: 6) {
+                Image(systemName: "calendar")
+                    .font(AppTypography.actionButtonCompact)
+                    .foregroundColor(AppColors.brand)
+                Text(Formatters.formatMonthYear(env.calendarCurrentMonth, timeZone: env.currentTimeZone))
+                    .font(AppTypography.cardHeaderLarge)
+                    .foregroundColor(AppColors.primaryText)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(AppColors.secondaryBackground.opacity(0.75))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule().stroke(AppColors.border.opacity(0.6), lineWidth: 0.6)
+            )
+            
+            Spacer()
+            
+            Button {
+                NativeHaptics.lightImpact()
+                env.changeCalendarMonth(by: 1)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(AppTypography.actionButtonCompact)
+                    .foregroundColor(AppColors.primaryText)
+                    .frame(width: 32, height: 32)
+                    .background(AppColors.secondaryBackground.opacity(0.75))
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(AppColors.border.opacity(0.6), lineWidth: 0.5))
+            }
+            .buttonStyle(ApplePressableButtonStyle())
+            .accessibilityLabel("Next month")
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+    
+    private var settingsSegmentedSubBar: some View {
+        AppleSlidingSegmentedBar(
+            selection: $env.settingsActiveSection,
+            items: SettingsSection.allCases,
+            titleFor: { $0.label },
+            iconFor: { $0.iconName },
+            isScrollable: true
+        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
+    }
+    
+    private var reportsSegmentedSubBar: some View {
+        AppleSlidingSegmentedBar(
+            selection: $env.reportsActiveMode,
+            items: ReportMode.allCases,
+            titleFor: { $0.rawValue },
+            iconFor: { $0.iconName },
+            isScrollable: true
+        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
+    }
+    
+    private var accountsSegmentedSubBar: some View {
+        AppleSlidingSegmentedBar(
+            selection: $env.accountFilterTab,
+            items: AccountFilterTab.allCases,
+            titleFor: { $0.rawValue },
+            badgeCountFor: { (tab: AccountFilterTab) -> Int in
+                switch tab {
+                case .default: return dataStore.accounts.filter { dataStore.isAccountVisible($0) }.count
+                case .active: return dataStore.accounts.filter { dataStore.isAccountActive($0) }.count
+                case .visible: return dataStore.accounts.filter { dataStore.isAccountVisible($0) }.count
+                case .all: return dataStore.accounts.count
+                }
+            }
+        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
+    }
+    
+    private var propFirmsSegmentedSubBar: some View {
+        AppleSlidingSegmentedBar(
+            selection: $env.propLedgerTab,
+            items: PropLedgerTab.allCases,
+            titleFor: { $0.rawValue }
+        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
+    }
+    
+    private var notebookFoldersSubBar: some View {
+        let activeFolders = dataStore.folders.filter { $0.deletedAt == nil }
+        let selectedFolder = activeFolders.first(where: { $0.id == (env.notebookFolderId ?? NotebookEngine.systemFolderAll) })
+            ?? activeFolders.first
+            ?? NotebookFolder(id: NotebookEngine.systemFolderAll, name: "All notes")
+        
+        return AppleSlidingSegmentedBar(
+            selection: Binding<NotebookFolder>(
+                get: { selectedFolder },
+                set: { env.notebookFolderId = ($0.id == NotebookEngine.systemFolderAll) ? nil : $0.id }
+            ),
+            items: activeFolders,
+            titleFor: { $0.name },
+            iconFor: { folder in
+                folder.id == NotebookEngine.systemFolderAll ? "tray.full" : "folder"
+            },
+            badgeCountFor: { folder in
+                dataStore.notebookNotes.filter {
+                    folder.id == NotebookEngine.systemFolderAll ? true : $0.folderId == folder.id
+                }.count
+            },
+            isScrollable: true
+        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
+    }
+    
+    // MARK: - Trailing Action Slot by Page Context
+    
+    private var hasSearchCapability: Bool {
+        env.selectedTab == .trades || env.selectedTab == .notebook || env.selectedTab == .missed || env.selectedTab == .journal
+    }
+    
+    @ViewBuilder
+    private var trailingActionSlot: some View {
+        HStack(spacing: 8) {
+            // Optional Search Toggle Button for Searchable Screens
+            if hasSearchCapability {
+                searchToggleButton
+            }
+            
+            switch env.selectedTab {
+            case .dashboard:
+                notificationBellButton
+                syncActionButton
+                aiScannerButton
+                
+            case .trades:
+                syncActionButton
+                
+            case .journal:
+                primaryActionButton(title: "Today", icon: "sun.max.fill") {
+                    env.requestOpenTodayJournal = true
+                }
+                
+            case .playbooks:
+                primaryActionButton(title: "Playbook", icon: "plus") {
+                    env.requestNewPlaybook = true
+                }
+                
+            case .notebook:
+                primaryActionButton(title: "Note", icon: "plus") {
+                    env.requestNewNote = true
+                }
+                
+            case .missed:
+                primaryActionButton(title: "Missed", icon: "plus") {
+                    env.requestNewMissedTrade = true
+                }
+                
+            case .accounts:
+                primaryActionButton(title: "Account", icon: "plus") {
+                    env.requestNewAccount = true
+                }
+                
+            case .progress:
+                primaryActionButton(title: "Routine", icon: "plus") {
+                    env.requestNewRoutine = true
+                }
+                
+            case .reports:
+                primaryActionButton(title: "Ask AI", icon: "sparkles") {
+                    showAiReflection = true
+                }
+                
+            case .propFirms:
+                syncActionButton
+                
+            default:
+                aiScannerButton
+            }
+        }
+    }
+    
+    // MARK: - Reusable Standardized Buttons
+    
+    private func primaryActionButton(title: String, icon: String = "plus", action: @escaping () -> Void) -> some View {
+        AppActionPill(title, icon: icon, action: action)
+    }
+    
+    private var syncActionButton: some View {
+        AppActionPill(dataStore.isSyncing ? "Syncing" : "Sync", icon: "arrow.triangle.2.circlepath") {
+            NativeHaptics.mediumImpact()
+            Task {
+                await dataStore.performGlobalSync()
+            }
+        }
+        .disabled(dataStore.isSyncing)
+    }
+    
+    private var searchToggleButton: some View {
+        Button {
+            NativeHaptics.lightImpact()
+            withAnimation(AppAnimations.springQuick) {
+                env.isSearchActive.toggle()
+                if !env.isSearchActive {
+                    env.searchQuery = ""
+                }
+            }
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(env.isSearchActive ? AppColors.brand.opacity(0.18) : AppColors.cardBackground)
+                    .frame(width: 32, height: 32)
+                    .overlay(
+                        Circle()
+                            .stroke(env.isSearchActive ? AppColors.brand : AppColors.border.opacity(0.55), lineWidth: 0.6)
+                    )
+                Image(systemName: env.isSearchActive ? "xmark" : "magnifyingglass")
+                    .font(AppTypography.actionButtonCompact)
+                    .foregroundColor(env.isSearchActive ? AppColors.brand : AppColors.secondaryText)
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(ApplePressableButtonStyle())
+    }
+    
+    // MARK: - Trailing Action Buttons
+    
+    private var notificationBellButton: some View {
+        Button {
+            NativeHaptics.lightImpact()
+            showNotificationCenter = true
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Circle()
+                    .fill(AppColors.cardBackground)
+                    .frame(width: 32, height: 32)
+                    .overlay(
+                        Circle()
+                            .stroke(AppColors.border.opacity(0.55), lineWidth: 0.6)
+                    )
+                Image(systemName: "bell.fill")
+                    .font(AppTypography.actionButtonCompact)
+                    .foregroundColor(AppColors.secondaryText)
+                    .frame(width: 32, height: 32)
+                
+                if AppNotificationCoordinator.shared.unreadCount > 0 {
+                    Circle()
+                        .fill(AppColors.loss)
+                        .frame(width: 8, height: 8)
+                        .offset(x: 1, y: 1)
+                }
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(ApplePressableButtonStyle())
+        .accessibilityLabel("Open notifications")
+    }
+    
+    private var aiScannerButton: some View {
+        Button {
+            NativeHaptics.mediumImpact()
+            showPreTradeAnalysis = true
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(AppColors.secondaryBackground.opacity(0.85))
+                    .frame(width: 32, height: 32)
+                    .overlay(
+                        Circle()
+                            .stroke(AppColors.border.opacity(0.55), lineWidth: 0.6)
+                    )
+                
+                Image(systemName: "sparkles")
+                    .font(AppTypography.actionButtonCompact)
+                    .foregroundColor(AppColors.brand)
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(ApplePressableButtonStyle())
+        .accessibilityLabel("Open AI Pre-Trade Analysis")
+    }
+}

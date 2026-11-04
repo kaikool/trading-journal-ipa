@@ -1,0 +1,135 @@
+import SwiftUI
+
+/// Playbooks screen matching iOS 27 design standards:
+/// - FilterBar with title "Playbooks" and "New playbook" button
+/// - Empty state with Apple-standard typography and action button
+/// - Interactive Playbook cards with expandable rules checklist (+ N more rules accordion)
+/// - Modernized New & Edit Playbook sheets with dynamic numbered checklist rows (1, 2, 3...)
+/// - Progressive disclosure: entering line 1 automatically spawns line 2
+public struct PlaybooksView: View {
+    @EnvironmentObject private var env: AppEnvironment
+    @ObservedObject private var dataStore = TradeDataStore.shared
+    
+    @State private var showNewPlaybookSheet: Bool = false
+    @State private var playbookToEdit: Playbook? = nil
+    @State private var playbookToDelete: Playbook? = nil
+    @State private var showDeleteConfirmation: Bool = false
+    @State private var selectedPlaybookForDetail: Playbook? = nil
+    
+    public init() {}
+    
+    private var adherenceSummaries: [PlaybookAdherenceSummary] {
+        AdherenceEngine.analyzeAdherence(
+            playbooks: dataStore.playbooks,
+            trades: dataStore.filteredTrades,
+            assessments: dataStore.playbookAssessments
+        )
+    }
+    
+    public var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                if dataStore.playbooks.isEmpty {
+                    emptyState
+                } else {
+                    playbooksList
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 88)
+        }
+        .onReceive(env.$requestNewPlaybook) { requested in
+            if requested {
+                env.requestNewPlaybook = false
+                showNewPlaybookSheet = true
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(AppColors.background)
+        .sheet(isPresented: $showNewPlaybookSheet) {
+            NewPlaybookSheet { newPb in
+                dataStore.savePlaybook(newPb)
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .sheet(item: $playbookToEdit) { pb in
+            EditPlaybookSheet(playbook: pb)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .sheet(item: $selectedPlaybookForDetail) { pb in
+            let pbTrades = tradesForPlaybook(pb.id)
+            let pbSummary = adherenceSummaries.first(where: { $0.playbook.id == pb.id })
+                ?? AdherenceEngine.analyzeAdherence(playbooks: [pb], trades: pbTrades, assessments: dataStore.playbookAssessments).first
+                ?? AdherenceEngine.defaultSummary(for: pb)
+            PlaybookDetailView(
+                playbook: pb,
+                summary: pbSummary,
+                trades: pbTrades,
+                isModal: true
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .appConfirmationAlert(
+            isPresented: $showDeleteConfirmation,
+            title: "Delete “\(playbookToDelete?.title ?? "")”?",
+            message: "Trades keep their data, just lose the link."
+        ) {
+            if let pb = playbookToDelete {
+                dataStore.deletePlaybook(id: pb.id)
+                playbookToDelete = nil
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var emptyState: some View {
+        AppleCard {
+            AppEmptyState(
+                icon: "book.pages",
+                title: "Build Trading Playbooks",
+                message: "A playbook is a setup you trade on purpose — name it, write its checklist rules, then tag trades with it and let Reports reveal its true edge.",
+                actionTitle: "New Playbook",
+                actionIcon: "plus",
+                isInCard: true
+            ) {
+                showNewPlaybookSheet = true
+            }
+        }
+        .padding(.top, 16)
+    }
+    
+    @ViewBuilder
+    private var playbooksList: some View {
+        ForEach(adherenceSummaries) { summary in
+            PlaybookCardView(
+                summary: summary,
+                currency: env.currentCurrency,
+                onSelect: {
+                    selectedPlaybookForDetail = summary.playbook
+                },
+                onEdit: {
+                    playbookToEdit = summary.playbook
+                },
+                onDelete: {
+                    playbookToDelete = summary.playbook
+                    showDeleteConfirmation = true
+                },
+                onSetDefault: {
+                    dataStore.setDefaultPlaybook(id: summary.playbook.isDefault ? nil : summary.playbook.id)
+                }
+            )
+        }
+    }
+    
+    private func tradesForPlaybook(_ playbookId: String) -> [Trade] {
+        dataStore.filteredTrades.filter { $0.playbookId == playbookId }
+    }
+}
+

@@ -1,0 +1,648 @@
+import Foundation
+import Combine
+import CryptoKit
+
+/// Official Exness REST API Integration Service based on exness-api.com specification
+/// Implements automatic Access Point Discovery, Ed25519 cryptographic signing, server clock drift compensation,
+/// live balance/equity snapshots, and full deals/executions/orders history synchronization.
+/// Private keys and sensitive tokens are securely stored in the iOS Hardware Keychain (AES-256).
+public final class ExnessService: ObservableObject, @unchecked Sendable, ExnessServiceProviding {
+    public static let shared = ExnessService()
+
+    // MARK: - Published State
+
+    @Published public var isConnected: Bool = false
+    @Published public var isConfigured: Bool = false
+    @Published public var isSyncing: Bool = false
+    @Published public var lastSyncDate: Date? = nil
+
+    // Default Exness API Gateway host per official exness-api.com specification
+    @Published public var apiHost: String = "https://api.exness-api.com"
+    @Published public var accountId: String = ""
+    @Published public var apiKey: String = ""
+    @Published public var accountName: String = ""
+
+    @Published public var currency: String = "USD"
+    @Published public var balance: Decimal = 0
+    @Published public var equity: Decimal = 0
+    @Published public var leverage: Int = 100
+    @Published public var syncedTradesCount: Int = 0
+    @Published public var workingHost: String? = nil
+    @Published public var workingBasePath: String? = nil
+    @Published public var lastSyncSummary: String = ""
+
+    // Resolved account-specific Access Point host (cached from discovery)
+    internal var cachedAccessPoint: String? = nil
+
+    // Server clock drift compensation (ms) to satisfy strict Exness timestamp window
+    internal var serverTimeOffsetMs: Int64 = 0
+
+    // MARK: - Keychain & UserDefaults Keys
+
+    internal let kExnessApiHost = "exness_api_host"
+    internal let kExnessAccountId = "exness_account_id"
+    internal let kExnessApiKey = "exness_api_key_public"
+    internal let kExnessPrivateKey = "exness_private_key_ed25519"
+    internal let kExnessLastSync = "exness_last_sync_date"
+    internal let kExnessCachedAccessPoint = "exness_cached_access_point"
+
+    private init() {
+        loadSettings()
+    }
+
+    // MARK: - Persistence & Security
+
+    public func loadSettings() {
+        let ud = UserDefaults.standard
+        var storedHost = ud.string(forKey: kExnessApiHost) ?? AppSecretsLoader.loadSecret(named: "EXNESS_HOST") ?? "https://api.exness-api.com"
+        if storedHost.isEmpty || storedHost == "https://api.exness.com" {
+            storedHost = "https://api.exness-api.com"
+            ud.set(storedHost, forKey: kExnessApiHost)
+        }
+        self.apiHost = storedHost
+
+        let plistAcc = AppSecretsLoader.loadSecret(named: "EXNESS_ACCOUNT_ID")
+        let acc = (plistAcc?.isEmpty == false) ? (plistAcc ?? "") : (ud.string(forKey: kExnessAccountId) ?? "")
+        if !acc.isEmpty {
+            ud.set(acc, forKey: kExnessAccountId)
+        }
+        self.accountId = acc
+
+        let plistKey = AppSecretsLoader.loadSecret(named: "EXNESS_API_KEY")
+        let key = (plistKey?.isEmpty == false) ? (plistKey ?? "") : (KeychainManager.get(forKey: kExnessApiKey) ?? "")
+        if !key.isEmpty {
+            KeychainManager.set(key, forKey: kExnessApiKey)
+        }
+        self.apiKey = key
+
+        let plistPriv = AppSecretsLoader.loadSecret(named: "EXNESS_PRIVATE_KEY")
+        let priv = (plistPriv?.isEmpty == false) ? (plistPriv ?? "") : (KeychainManager.get(forKey: kExnessPrivateKey) ?? "")
+        if !priv.isEmpty {
+            KeychainManager.set(priv, forKey: kExnessPrivateKey)
+        }
+
+        self.lastSyncDate = ud.object(forKey: kExnessLastSync) as? Date
+
+        if let cap = ud.string(forKey: kExnessCachedAccessPoint), !cap.contains("api.exness.com") {
+            self.cachedAccessPoint = cap
+        } else {
+            self.cachedAccessPoint = nil
+            ud.removeObject(forKey: kExnessCachedAccessPoint)
+        }
+
+        let hasPrivateKey = !priv.isEmpty
+        self.isConfigured = !accountId.isEmpty && !apiKey.isEmpty && hasPrivateKey
+    }
+
+    public func saveCredentials(
+        host: String,
+        accountId: String,
+        apiKey: String,
+        privateKey: String
+    ) {
+        let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalHost = cleanHost.isEmpty ? "https://api.exness-api.com" : cleanHost
+        let cleanAccountId = accountId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanApiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanPrivateKey = privateKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let ud = UserDefaults.standard
+        ud.set(finalHost, forKey: kExnessApiHost)
+        ud.set(cleanAccountId, forKey: kExnessAccountId)
+
+        if !cleanApiKey.isEmpty {
+            KeychainManager.set(cleanApiKey, forKey: kExnessApiKey)
+        }
+        if !cleanPrivateKey.isEmpty {
+            KeychainManager.set(cleanPrivateKey, forKey: kExnessPrivateKey)
+        }
+
+        self.cachedAccessPoint = nil
+        ud.removeObject(forKey: kExnessCachedAccessPoint)
+
+        Task { @MainActor in
+            self.apiHost = finalHost
+            self.accountId = cleanAccountId
+            self.apiKey = cleanApiKey
+            self.isConfigured = !cleanAccountId.isEmpty && !cleanApiKey.isEmpty && (!cleanPrivateKey.isEmpty || KeychainManager.get(forKey: self.kExnessPrivateKey) != nil)
+        }
+    }
+
+    public func getStoredPrivateKey() -> String {
+        KeychainManager.get(forKey: kExnessPrivateKey) ?? AppSecretsLoader.loadSecret(named: "EXNESS_PRIVATE_KEY") ?? ""
+    }
+
+    public func disconnect() {
+        let ud = UserDefaults.standard
+        ud.removeObject(forKey: kExnessApiHost)
+        ud.removeObject(forKey: kExnessAccountId)
+        ud.removeObject(forKey: kExnessLastSync)
+        ud.removeObject(forKey: kExnessCachedAccessPoint)
+
+        KeychainManager.delete(forKey: kExnessApiKey)
+        KeychainManager.delete(forKey: kExnessPrivateKey)
+        self.cachedAccessPoint = nil
+
+        Task { @MainActor in
+            self.accountId = ""
+            self.apiKey = ""
+            self.isConfigured = false
+            self.isConnected = false
+            self.lastSyncDate = nil
+            self.balance = 0
+            self.equity = 0
+            self.syncedTradesCount = 0
+            self.workingHost = nil
+            self.workingBasePath = nil
+            self.lastSyncSummary = ""
+        }
+    }
+
+    // MARK: - Server Time Synchronization
+
+    /// Synchronizes client time offset against the Exness server Date header
+    public func syncServerTimeIfNeeded() async {
+        guard let url = URL(string: "https://api.exness-api.com/") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 5
+        let start = Date()
+        if let (_, response) = try? await URLSession.shared.data(for: req),
+           let http = response as? HTTPURLResponse {
+            recordServerTime(from: http, roundTripStart: start)
+        }
+    }
+
+    internal func recordServerTime(from response: HTTPURLResponse, roundTripStart: Date) {
+        let rawDate = response.value(forHTTPHeaderField: "Date") ?? (response.allHeaderFields["Date"] as? String)
+        guard let dateStr = rawDate else { return }
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone(secondsFromGMT: 0)
+        df.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+
+        if let serverDate = df.date(from: dateStr) {
+            let roundTrip = Date().timeIntervalSince(roundTripStart)
+            let estimatedServerTime = serverDate.timeIntervalSince1970 + (roundTrip / 2.0)
+            let offset = Int64((estimatedServerTime - Date().timeIntervalSince1970) * 1000)
+            self.serverTimeOffsetMs = offset
+            AppLogger.info("Exness: Synchronized server time offset: \(offset) ms")
+        }
+    }
+
+    // MARK: - Exness Cryptographic Signing Engine (exness-api.com Spec)
+
+    internal func base64UrlEncode(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+    }
+
+    /// Constructs canonical headers and signs payload using Ed25519 as specified by exness-api.com
+    internal func signRequest(
+        method: String,
+        path: String,
+        bodyData: Data? = nil,
+        idempotencyKey: String = ""
+    ) throws -> [String: String] {
+        let cleanKey = apiKey.isEmpty ? (KeychainManager.get(forKey: kExnessApiKey) ?? AppSecretsLoader.loadSecret(named: "EXNESS_API_KEY") ?? "") : apiKey
+        let privKeyStr = getStoredPrivateKey()
+
+        guard !cleanKey.isEmpty, !privKeyStr.isEmpty else {
+            throw NSError(domain: "ExnessService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Missing EXN-API-KEY or Ed25519 Private Key in Keychain/Secrets."])
+        }
+
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1000) + serverTimeOffsetMs
+
+        // Exact SHA-256 body hash per Exness spec:
+        // "For requests without a body, body_hash is the SHA-256 hash of the empty byte sequence: 47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+        let bodyHash: String
+        if let body = bodyData, !body.isEmpty {
+            let digest = SHA256.hash(data: body)
+            bodyHash = base64UrlEncode(Data(digest))
+        } else {
+            bodyHash = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+        }
+
+        // Canonical payload dictionary for EXN-DATA (sign_version must be integer 1, timestamp in integer ms)
+        let canonicalPayload: [String: Any] = [
+            "api_key": cleanKey,
+            "idempotency_key": idempotencyKey,
+            "timestamp": timestamp,
+            "sign_version": 1,
+            "method": method.uppercased(),
+            "path": path,
+            "body_hash": bodyHash
+        ]
+
+        let jsonData = try JSONSerialization.data(withJSONObject: canonicalPayload, options: [.sortedKeys])
+        let exnData = base64UrlEncode(jsonData)
+
+        // Clean PEM/Hex/Base64 Ed25519 Private Key
+        let cleanKeyStr = privKeyStr
+            .replacingOccurrences(of: "-----BEGIN PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "-----END PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "-----BEGIN ED25519 PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "-----END ED25519 PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Parse Ed25519 raw 32-byte seed from PKCS#8 DER (48 bytes), Libsodium (64 bytes), 128-char Hex, 64-char Hex, or Base64
+        let rawKeyData: Data = {
+            // 1. Standard base64
+            if let d = Data(base64Encoded: cleanKeyStr) {
+                if d.count == 32 { return d }
+                if d.count == 48 { return d.subdata(in: 16..<48) } // Standard PKCS#8 Ed25519 offset
+                if d.count == 64 { return d.subdata(in: 0..<32) }  // Libsodium 64-byte seed+pubkey
+            }
+            // 2. URL-safe base64 fallback
+            let standardB64 = cleanKeyStr
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let paddedB64 = standardB64.padding(
+                toLength: ((standardB64.count + 3) / 4) * 4,
+                withPad: "=",
+                startingAt: 0
+            )
+            if let d = Data(base64Encoded: paddedB64) {
+                if d.count == 32 { return d }
+                if d.count == 48 { return d.subdata(in: 16..<48) }
+                if d.count == 64 { return d.subdata(in: 0..<32) }
+            }
+            // 3. Hex 64 chars (32 bytes raw seed)
+            if cleanKeyStr.count == 64 {
+                var d = Data()
+                var idx = cleanKeyStr.startIndex
+                for _ in 0..<32 {
+                    let nextIdx = cleanKeyStr.index(idx, offsetBy: 2)
+                    let byteStr = String(cleanKeyStr[idx..<nextIdx])
+                    if let byte = UInt8(byteStr, radix: 16) { d.append(byte) }
+                    idx = nextIdx
+                }
+                if d.count == 32 { return d }
+            }
+            // 4. Hex 128 chars (64 bytes: 32 bytes seed + 32 bytes public key)
+            if cleanKeyStr.count == 128 {
+                var d = Data()
+                var idx = cleanKeyStr.startIndex
+                for _ in 0..<32 { // extract first 32 bytes (64 hex characters)
+                    let nextIdx = cleanKeyStr.index(idx, offsetBy: 2)
+                    let byteStr = String(cleanKeyStr[idx..<nextIdx])
+                    if let byte = UInt8(byteStr, radix: 16) { d.append(byte) }
+                    idx = nextIdx
+                }
+                if d.count == 32 { return d }
+            }
+            return cleanKeyStr.data(using: .utf8) ?? Data()
+        }()
+
+        var exnSign = ""
+        if let ed25519Key = try? Curve25519.Signing.PrivateKey(rawRepresentation: rawKeyData) {
+            let signature = try ed25519Key.signature(for: jsonData)
+            exnSign = base64UrlEncode(signature)
+        } else {
+            // Symmetric HMAC fallback if private key was provided as plain secret string
+            let symmetricKey = SymmetricKey(data: privKeyStr.data(using: .utf8) ?? Data())
+            let signature = HMAC<SHA256>.authenticationCode(for: jsonData, using: symmetricKey)
+            exnSign = base64UrlEncode(Data(signature))
+        }
+
+        var headers: [String: String] = [
+            "EXN-API-KEY": cleanKey,
+            "EXN-IDEMPOTENCY-KEY": idempotencyKey,
+            "EXN-TIMESTAMP": String(timestamp),
+            "EXN-SIGN-VERSION": "1",
+            "EXN-DATA": exnData,
+            "EXN-SIGN": exnSign,
+            "User-Agent": "TradeJournal-iOS/1.0"
+        ]
+        if bodyData != nil {
+            headers["Content-Type"] = "application/json"
+        }
+        return headers
+    }
+
+    // MARK: - Access Point / Host Discovery (Official exness-api.com Spec)
+
+    /// Resolves the dynamic Access Point URL for this account ID via the Exness Gateway
+    public func resolveAccessPoint() async -> String {
+        if let cached = cachedAccessPoint, !cached.isEmpty, cached.contains("ap-") {
+            return cached
+        }
+
+        let cleanConfiguredHost = apiHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanConfiguredHost.contains("ap-") {
+            self.cachedAccessPoint = cleanConfiguredHost
+            return cleanConfiguredHost
+        }
+
+        let cleanId = accountId.cleanAccountId
+        guard !cleanId.isEmpty else {
+            return "https://api.exness-api.com"
+        }
+
+        if serverTimeOffsetMs == 0 {
+            await syncServerTimeIfNeeded()
+        }
+
+        let candidateGateways = [
+            "https://api.exness-api.com",
+            "https://api.exness.com"
+        ]
+
+        for gw in candidateGateways {
+            let path = "/v1/trading/access-point?account_id=\(cleanId)"
+            guard let url = URL(string: "\(gw)\(path)") else { continue }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 8
+
+            guard let headers = try? signRequest(method: "GET", path: path, bodyData: nil) else { continue }
+            headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+
+            let reqStart = Date()
+            if let (data, response) = try? await URLSession.shared.data(for: request),
+               let http = response as? HTTPURLResponse {
+                recordServerTime(from: http, roundTripStart: reqStart)
+                if http.statusCode == 200 {
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        let ap = (json["access_point"] as? String) ??
+                                 ((json["data"] as? [String: Any])?["access_point"] as? String) ??
+                                 (json["cluster"] as? String) ??
+                                 (json["host"] as? String)
+                        if let apStr = ap, !apStr.isEmpty {
+                            var cleanAp = apStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !cleanAp.hasPrefix("http://") && !cleanAp.hasPrefix("https://") {
+                                cleanAp = "https://" + cleanAp
+                            }
+                            self.cachedAccessPoint = cleanAp
+                            UserDefaults.standard.set(cleanAp, forKey: kExnessCachedAccessPoint)
+                            AppLogger.info("Exness: Access Point discovered -> \(cleanAp)")
+                            return cleanAp
+                        }
+                    }
+                }
+            }
+        }
+
+        AppLogger.info("Exness: Dynamic access point not returned; falling back to gateway https://api.exness-api.com")
+        return "https://api.exness-api.com"
+    }
+
+    // MARK: - Safe Data Parsers
+
+    internal func parseDecimal(_ val: Any?) -> Decimal? {
+        guard let v = val else { return nil }
+        if let d = v as? Decimal { return d }
+        if let num = v as? NSNumber {
+            return Decimal(string: num.stringValue) ?? Decimal(num.doubleValue)
+        }
+        if let str = v as? String {
+            let clean = str.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "")
+            return Decimal(string: clean)
+        }
+        if let d = v as? Double { return Decimal(d) }
+        if let i = v as? Int { return Decimal(i) }
+        if let i64 = v as? Int64 { return Decimal(i64) }
+        return nil
+    }
+
+    internal func parseDouble(_ val: Any?) -> Double? {
+        guard let v = val else { return nil }
+        if let d = v as? Double { return d }
+        if let num = v as? NSNumber { return num.doubleValue }
+        if let str = v as? String {
+            let clean = str.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "")
+            return Double(clean)
+        }
+        if let i = v as? Int { return Double(i) }
+        if let i64 = v as? Int64 { return Double(i64) }
+        return nil
+    }
+
+    internal func parseDate(_ val: Any?) -> Date? {
+        guard let v = val else { return nil }
+        if let d = v as? Date { return d }
+        if let ms = v as? Int64 {
+            return Date(timeIntervalSince1970: ms > 10_000_000_000 ? Double(ms) / 1000.0 : Double(ms))
+        }
+        if let sec = v as? Double {
+            return Date(timeIntervalSince1970: sec > 10_000_000_000 ? sec / 1000.0 : sec)
+        }
+        if let num = v as? NSNumber {
+            let d = num.doubleValue
+            return Date(timeIntervalSince1970: d > 10_000_000_000 ? d / 1000.0 : d)
+        }
+        if let str = v as? String {
+            let clean = str.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let isoWithFractional = ISO8601DateFormatter()
+            isoWithFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = isoWithFractional.date(from: clean) {
+                return d
+            }
+            if let d = ISO8601DateFormatter().date(from: clean) {
+                return d
+            }
+            let df = DateFormatter()
+            df.locale = Locale(identifier: "en_US_POSIX")
+            df.timeZone = TimeZone(secondsFromGMT: 0)
+            let formats = [
+                "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZZZZZ",
+                "yyyy-MM-dd'T'HH:mm:ss.SSSZZZZZ",
+                "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+                "yyyy-MM-dd'T'HH:mm:ssZ",
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy.MM.dd HH:mm:ss",
+                "yyyy/MM/dd HH:mm:ss"
+            ]
+            for fmt in formats {
+                df.dateFormat = fmt
+                if let d = df.date(from: clean) { return d }
+            }
+            if let sec = Double(clean) {
+                return Date(timeIntervalSince1970: sec > 10_000_000_000 ? sec / 1000.0 : sec)
+            }
+        }
+        return nil
+    }
+
+    @MainActor
+    public func syncAccountWithDataStore() {
+        guard !accountId.isEmpty else { return }
+        let cleanId = accountId.cleanAccountId
+        let journalAccId = "exness_\(cleanId)"
+        let resolvedAccountName = self.accountName.isEmpty ? "Exness (\(cleanId))" : "\(self.accountName) (\(cleanId))"
+        let dataStore = TradeDataStore.shared
+        var hasChanges = false
+
+        if let existingIdx = dataStore.accounts.firstIndex(where: {
+            $0.id == journalAccId ||
+            $0.id == cleanId ||
+            $0.id == self.accountId ||
+            $0.id.isEquivalentAccountId(to: journalAccId) ||
+            $0.name.contains(cleanId)
+        }) {
+            var acc = dataStore.accounts[existingIdx]
+            if acc.initialBalance != self.balance || acc.currency != self.currency || acc.name != resolvedAccountName {
+                acc.name = resolvedAccountName
+                acc.broker = "Exness"
+                acc.currency = self.currency
+                acc.initialBalance = self.balance
+                acc.lastSyncAt = Date()
+                acc.visibleInJournal = true
+                dataStore.accounts[existingIdx] = acc
+                hasChanges = true
+                AppLogger.info("Exness: Synced account \(acc.id) balance -> \(self.balance) \(self.currency)")
+            }
+        } else {
+            let newAcc = Account(
+                id: journalAccId,
+                name: resolvedAccountName,
+                broker: "Exness",
+                kind: .sync,
+                currency: self.currency,
+                initialBalance: self.balance,
+                profitCalcMethod: .fifo,
+                autoSync: true,
+                visibleInJournal: true
+            )
+            dataStore.accounts.append(newAcc)
+            hasChanges = true
+            AppLogger.info("Exness: Created new account \(journalAccId) balance -> \(self.balance) \(self.currency)")
+        }
+
+        if dataStore.selectedAccountId.isEmpty || dataStore.selectedAccountId == "default-acc" {
+            dataStore.selectedAccountId = journalAccId
+            hasChanges = true
+        }
+
+        // Only trigger UI invalidation and disk write if data actually changed
+        if hasChanges {
+            dataStore.invalidatePerformanceCaches()
+            dataStore.saveToDisk(immediate: true)
+            dataStore.objectWillChange.send()
+
+            Task {
+                if SupabaseService.shared.isConfigured,
+                   let acc = dataStore.accounts.first(where: { $0.id == journalAccId }) {
+                    try? await SupabaseService.shared.upsertAccounts([acc])
+                }
+                await dataStore.syncWithSupabase(isBackground: true)
+            }
+        }
+    }
+
+    // MARK: - API Calls
+
+    /// Tests authentication and connectivity to Exness REST API using official Discovery, Account Details, and Snapshot endpoints
+    public func testConnection() async throws -> (success: Bool, message: String) {
+        let cleanId = accountId.cleanAccountId
+        guard !cleanId.isEmpty else {
+            return (false, "Please configure Exness Account ID.")
+        }
+
+        await syncServerTimeIfNeeded()
+
+        // 1. Discover cluster Access Point host
+        let apHost = await resolveAccessPoint()
+        guard !apHost.isEmpty else {
+            return (false, "Could not discover Exness cluster access point.")
+        }
+
+        // 2. Fetch Account Configuration metadata (/v1/configuration/accounts/{account_id}/account)
+        var discoveredName = ""
+        var discoveredCurrency = "USD"
+        var discoveredLeverage = 100
+
+        let configPath = "/v1/configuration/accounts/\(cleanId)/account"
+        if let configUrl = URL(string: "\(apHost)\(configPath)") {
+            var cReq = URLRequest(url: configUrl)
+            cReq.httpMethod = "GET"
+            cReq.timeoutInterval = 8
+
+            if let cHeaders = try? signRequest(method: "GET", path: configPath, bodyData: nil) {
+                cHeaders.forEach { cReq.setValue($1, forHTTPHeaderField: $0) }
+                let cStart = Date()
+                if let (cData, cRes) = try? await URLSession.shared.data(for: cReq),
+                   let cHttp = cRes as? HTTPURLResponse {
+                    recordServerTime(from: cHttp, roundTripStart: cStart)
+                    if cHttp.statusCode == 200,
+                       let cJson = try? JSONSerialization.jsonObject(with: cData) as? [String: Any] {
+                        if let n = cJson["account_name"] as? String, !n.isEmpty {
+                            discoveredName = n
+                        }
+                        if let s = cJson["settings"] as? [String: Any] {
+                            if let cur = s["currency"] as? String {
+                                let cleanCur = cur.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                                discoveredCurrency = (cleanCur == "USC" || cleanCur == "USCENT" || cleanCur == "CENT") ? "USD" : cleanCur
+                            }
+                            if let levStr = s["leverage"] as? String, let levInt = Int(levStr) {
+                                discoveredLeverage = levInt
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fetch Trading State Snapshot (/v1/trading/accounts/{account_id}/snapshot)
+        let snapshotPath = "/v1/trading/accounts/\(cleanId)/snapshot"
+        guard let snapshotUrl = URL(string: "\(apHost)\(snapshotPath)") else {
+            return (false, "Invalid Exness Snapshot URL.")
+        }
+
+        var sReq = URLRequest(url: snapshotUrl)
+        sReq.httpMethod = "GET"
+        sReq.timeoutInterval = 8
+
+        guard let sHeaders = try? signRequest(method: "GET", path: snapshotPath, bodyData: nil) else {
+            return (false, "Failed to sign Exness Snapshot request with Ed25519.")
+        }
+        sHeaders.forEach { sReq.setValue($1, forHTTPHeaderField: $0) }
+
+        let sStart = Date()
+        guard let (sData, sResponse) = try? await URLSession.shared.data(for: sReq),
+              let sHttp = sResponse as? HTTPURLResponse else {
+            await MainActor.run { self.isConnected = false }
+            return (false, "Unable to reach Exness Trading Snapshot.")
+        }
+        recordServerTime(from: sHttp, roundTripStart: sStart)
+
+        if sHttp.statusCode == 200 {
+            if let json = try? JSONSerialization.jsonObject(with: sData) as? [String: Any],
+               let state = json["account_state"] as? [String: Any] {
+                let bal = parseDecimal(state["balance"]) ?? 0
+                let eq = parseDecimal(state["equity"]) ?? bal
+
+                await MainActor.run {
+                    self.workingHost = apHost
+                    self.workingBasePath = snapshotPath
+                    self.balance = bal
+                    self.equity = eq
+                    self.currency = discoveredCurrency
+                    if !discoveredName.isEmpty {
+                        self.accountName = discoveredName
+                    }
+                    self.leverage = discoveredLeverage
+                    self.isConnected = true
+                    self.syncAccountWithDataStore()
+                }
+
+                let formattedBal = Formatters.formatCurrency(bal, currency: discoveredCurrency)
+                let accLabel = discoveredName.isEmpty ? "Account \(cleanId)" : "'\(discoveredName)'"
+                return (true, "Exness \(accLabel) • Balance: \(formattedBal)")
+            }
+        } else if sHttp.statusCode == 401 || sHttp.statusCode == 403 {
+            await MainActor.run { self.isConnected = false }
+            return (false, "Exness authentication failed (HTTP \(sHttp.statusCode)). Please verify API key & secret.")
+        }
+
+        await MainActor.run { self.isConnected = false }
+        return (false, "Exness Snapshot returned HTTP \(sHttp.statusCode).")
+    }
+}

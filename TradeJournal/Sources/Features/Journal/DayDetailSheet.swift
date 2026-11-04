@@ -1,0 +1,379 @@
+import SwiftUI
+
+/// Model representing pre-computed day details passed directly to DayDetailSheet
+public struct DayDetailContext: Identifiable {
+    public var id: String { dateKey }
+    public let dateKey: String
+    public let stats: DayStats?
+    public let trades: [Trade]
+    public let note: JournalNote
+    
+    public init(dateKey: String, stats: DayStats?, trades: [Trade], note: JournalNote) {
+        self.dateKey = dateKey
+        self.stats = stats
+        self.trades = trades
+        self.note = note
+    }
+}
+
+// MARK: - DayDetailSheet
+
+public struct DayDetailSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var env: AppEnvironment
+    @ObservedObject private var ffService = ForexFactoryService.shared
+    
+    public let dateKey: String
+    public let stats: DayStats?
+    public let trades: [Trade]
+    public let note: JournalNote
+    public let onSaveNote: (JournalNote) -> Void
+    public let onAddTrade: () -> Void
+    
+    @State private var noteContent: String = ""
+    @State private var rating: Int = 0
+    @State private var showDeleteNoteAlert: Bool = false
+    @State private var saveStatus: String = ""
+    @State private var showFullJournal: Bool = false
+    
+    public init(
+        dateKey: String,
+        stats: DayStats?,
+        trades: [Trade],
+        note: JournalNote,
+        onSaveNote: @escaping (JournalNote) -> Void,
+        onAddTrade: @escaping () -> Void
+    ) {
+        self.dateKey = dateKey
+        self.stats = stats
+        self.trades = trades
+        self.note = note
+        self.onSaveNote = onSaveNote
+        self.onAddTrade = onAddTrade
+        _noteContent = State(initialValue: note.content)
+        _rating = State(initialValue: note.rating ?? 0)
+    }
+    
+    private static let titleInFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+
+    private static let titleOutFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US")
+        f.dateFormat = "EEE, MMM d, yyyy"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+    
+    private func formattedDateTitle(_ key: String) -> String {
+        guard let d = Self.titleInFormatter.date(from: key) else { return key }
+        return Self.titleOutFormatter.string(from: d)
+    }
+    
+    private var dayEconomicEvents: [ForexFactoryEvent] {
+        ffService.usdEvents.filter { e in
+            e.matches(dateKey: dateKey, timeZone: env.currentTimeZone)
+        }
+    }
+    
+    public var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 14) {
+                    summaryCard
+                    noteCard
+                    tradesCard
+                    if !dayEconomicEvents.isEmpty {
+                        DayEconomicCalendarView(events: dayEconomicEvents, timeZone: env.currentTimeZone)
+                    }
+                    actionButtons
+                }
+                .padding(14)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .background(AppColors.background.ignoresSafeArea())
+            .navigationTitle(formattedDateTitle(dateKey))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    ModalDismissButton { dismiss() }
+                }
+                
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 8) {
+                        if !noteContent.isEmpty || rating > 0 {
+                            ModalDeleteButton { showDeleteNoteAlert = true }
+                        }
+                        
+                        ModalPrimaryButton("Done") {
+                            save()
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .appConfirmationAlert(
+                isPresented: $showDeleteNoteAlert,
+                title: "Delete note for this day?",
+                message: "This note will be permanently removed from your calendar and Supabase."
+            ) {
+                noteContent = ""
+                rating = 0
+                TradeDataStore.shared.deleteCalendarNote(for: dateKey)
+                saveStatus = "Deleted"
+            }
+            .sheet(isPresented: $showFullJournal, onDismiss: { reloadNote() }) {
+                DailyJournalDetailView(date: dateKey, isModal: true)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+                    .presentationCornerRadius(28)
+            }
+            .onDisappear {
+                save()
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var summaryCard: some View {
+        let netPnl = stats?.netPnl ?? .zero
+        let isProfit = netPnl >= 0
+        let pnlColor = isProfit ? AppColors.profit : AppColors.loss
+        let tradeCount = stats?.trades ?? trades.count
+        let wins = stats?.wins ?? trades.filter { $0.netPnl > 0 }.count
+        let losses = stats?.losses ?? trades.filter { $0.netPnl < 0 }.count
+        let winRate: Double? = tradeCount > 0 ? (Double(wins) / Double(tradeCount)) : nil
+        
+        AppCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Net P&L")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.secondaryText)
+                        AppMonetaryText(
+                            Formatters.formatPnL(netPnl, currency: env.currentCurrency, isPrivate: env.isPrivacyModeEnabled),
+                            isPrivate: env.isPrivacyModeEnabled,
+                            font: AppTypography.financialNumber(size: 24, weight: .bold),
+                            color: pnlColor
+                        )
+                    }
+                    
+                    Spacer()
+                    
+                    HStack(spacing: 6) {
+                        if let wr = winRate, tradeCount > 0 {
+                            AppBadge(Formatters.percent(wr), variant: wr >= 0.5 ? .profit : .loss)
+                        }
+                        AppBadge("\(tradeCount) trade\(tradeCount == 1 ? "" : "s")", variant: .secondary)
+                    }
+                }
+                
+                if tradeCount > 0 {
+                    Divider().background(AppColors.border.opacity(0.35))
+                    
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Win / Loss")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.secondaryText)
+                            Text("\(wins)W · \(losses)L")
+                                .font(AppTypography.captionBold)
+                                .foregroundColor(AppColors.primaryText)
+                        }
+                        
+                        if let gross = stats?.grossPnl {
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 3) {
+                                Text("Gross P&L")
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.secondaryText)
+                                Text(Formatters.currency(gross, currencyCode: env.currentCurrency, isPrivate: env.isPrivacyModeEnabled))
+                                    .font(AppTypography.captionBold)
+                                    .monospacedDigit()
+                                    .foregroundColor(AppColors.primaryText)
+                            }
+                        }
+                        
+                        if let vol = stats?.volume, vol > 0 {
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 3) {
+                                Text("Volume")
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.secondaryText)
+                                Text("\(vol.formatted()) lots")
+                                    .font(AppTypography.captionBold)
+                                    .monospacedDigit()
+                                    .foregroundColor(AppColors.primaryText)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var noteCard: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center) {
+                    AppSectionHeader("Daily note")
+                    Spacer()
+                    HStack(spacing: 4) {
+                        ForEach(1...5, id: \.self) { star in
+                            Image(systemName: star <= rating ? "star.fill" : "star")
+                                .font(AppTypography.cardHeader)
+                                .foregroundColor(star <= rating ? AppColors.warning : AppColors.mutedText)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    NativeHaptics.lightImpact()
+                                    rating = (rating == star) ? 0 : star
+                                    save()
+                                }
+                        }
+                    }
+                }
+                
+                // Rich Note Editor with Office-style formatting and AI-style Markdown preview
+                RichNoteEditor(
+                    text: $noteContent,
+                    placeholder: "Write thoughts or notes for this day...",
+                    minHeight: 110,
+                    allowPreviewToggle: true,
+                    onSave: {
+                        save()
+                    }
+                )
+                
+                HStack(spacing: 12) {
+                    if !saveStatus.isEmpty {
+                        Text(saveStatus)
+                            .font(AppTypography.captionMicro)
+                            .foregroundColor(AppColors.secondaryText)
+                    }
+                    
+                    Spacer()
+                    
+                    if !noteContent.isEmpty {
+                        AppSecondaryButton("Clear", height: 28) {
+                            noteContent = ""
+                            save()
+                        }
+                    }
+                    
+                    AppPrimaryButton("Save", icon: "checkmark", height: 28) {
+                        save()
+                    }
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var tradesCard: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                AppSectionHeader("Trades", badge: "\(trades.count)")
+                
+                if trades.isEmpty {
+                    AppEmptyState(
+                        icon: "tray",
+                        title: "No closed trades",
+                        message: "There are no closed trade executions recorded on this day.",
+                        iconColor: AppColors.secondaryText,
+                        actionTitle: "Add Trade",
+                        actionIcon: "plus",
+                        isInCard: true,
+                        action: onAddTrade
+                    )
+                } else {
+                    ForEach(trades) { trade in
+                        tradeRow(trade)
+                        if trade.id != trades.last?.id {
+                            Divider().background(AppColors.border)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func tradeRow(_ trade: Trade) -> some View {
+        let isProfit = trade.netPnl >= 0
+        let pnlColor = isProfit ? AppColors.profit : AppColors.loss
+        
+        HStack {
+            AppBadge(trade.status.rawValue.uppercased(), color: Formatters.statusColor(trade.status))
+            Text(trade.symbol)
+                .font(AppTypography.bodyBold)
+                .foregroundColor(AppColors.primaryText)
+            Spacer()
+            AppMonetaryText(
+                Formatters.formatPnL(trade.netPnl, currency: env.currentCurrency),
+                isPrivate: env.isPrivacyModeEnabled,
+                font: AppTypography.financialNumber(size: 13, weight: .semibold),
+                color: pnlColor
+            )
+        }
+        .padding(.vertical, 4)
+    }
+    
+    @ViewBuilder
+    private var actionButtons: some View {
+        HStack(spacing: 10) {
+            AppPrimaryButton("Add Trade", icon: "plus", fullWidth: true, height: 38, action: onAddTrade)
+            AppSecondaryButton("Full Journal", icon: "doc.text", fullWidth: true, height: 38) {
+                showFullJournal = true
+            }
+        }
+    }
+    
+    private func reloadNote() {
+        let saved = TradeDataStore.shared.getJournalDayNote(date: dateKey)
+        if !saved.isEmpty {
+            noteContent = saved
+        } else if let cal = TradeDataStore.shared.calendarNotes[dateKey] {
+            noteContent = cal.content
+            rating = cal.rating ?? 0
+        }
+    }
+    
+    private func applyFormat(marker: String) {
+        NativeHaptics.lightImpact()
+        noteContent = NoteFormattingEngine.appendInlineFormat(to: noteContent, marker: marker)
+        save()
+    }
+    
+    private func insertBullet() {
+        NativeHaptics.lightImpact()
+        noteContent = NoteFormattingEngine.appendBulletItem(to: noteContent)
+        save()
+    }
+    
+    private func insertNumberedList() {
+        NativeHaptics.lightImpact()
+        noteContent = NoteFormattingEngine.appendNumberedItem(to: noteContent)
+        save()
+    }
+
+    private func save() {
+        let trimmed = noteContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty && rating == 0 {
+            TradeDataStore.shared.deleteCalendarNote(for: dateKey)
+            saveStatus = "Deleted"
+            return
+        }
+        var updated = note
+        updated.content = noteContent
+        updated.rating = rating > 0 ? rating : nil
+        updated.updatedAt = Date()
+        onSaveNote(updated)
+        saveStatus = "Saved"
+    }
+}

@@ -1,0 +1,504 @@
+import SwiftUI
+
+public enum TradeStatusFilter: String, CaseIterable, Identifiable {
+    case all = "All Status"
+    case win = "Win"
+    case loss = "Loss"
+    case open = "Open"
+    
+    public var id: String { rawValue }
+}
+
+public struct TradesListView: View {
+    @EnvironmentObject private var env: AppEnvironment
+    @ObservedObject private var dataStore = TradeDataStore.shared
+    
+    @State private var showAddTradeSheet: Bool = false
+    @State private var showPreTradeSheet: Bool = false
+    @State private var searchText: String = ""
+    @State private var statusFilter: TradeStatusFilter = .all
+    @State private var selectedTrade: Trade? = nil
+    @State private var tradeForAICoach: Trade? = nil
+    
+    public init() {}
+    
+    private var cache: TradesListCache { TradesListCache.shared }
+    
+    @MainActor
+    private final class TradesListCache {
+        static let shared = TradesListCache()
+        var lastMetricsKey: String = ""
+        var lastMetrics: TradeMetrics? = nil
+        var lastScopedKey: String = ""
+        var lastScopedTrades: [Trade] = []
+        var lastFilterKey: String = ""
+        var lastFilteredTrades: [Trade] = []
+    }
+    
+    private var scopedTrades: [Trade] {
+        let key = "\(dataStore.selectedTimeRange.rawValue)_\(dataStore.selectedAccountId)_\(dataStore.filteredTrades.count)_\(dataStore.cacheVersion)_\(env.currentTimeZone.identifier)"
+        if cache.lastScopedKey == key {
+            return cache.lastScopedTrades
+        }
+        let fresh = dataStore.selectedTimeRange.filterTrades(dataStore.filteredTrades, timeZone: env.currentTimeZone)
+        cache.lastScopedKey = key
+        cache.lastScopedTrades = fresh
+        return fresh
+    }
+    
+    private var filteredTrades: [Trade] {
+        let q = (env.isSearchActive ? env.searchQuery : searchText).trimmingCharacters(in: .whitespaces).lowercased()
+        let key = "\(dataStore.selectedTimeRange.rawValue)_\(statusFilter.rawValue)_\(q)_\(dataStore.selectedAccountId)_\(dataStore.filteredTrades.count)_\(dataStore.cacheVersion)"
+        if cache.lastFilterKey == key {
+            return cache.lastFilteredTrades
+        }
+        var list = scopedTrades
+        
+        switch statusFilter {
+        case .all:
+            break
+        case .win:
+            list = list.filter { $0.status == .win }
+        case .loss:
+            list = list.filter { $0.status == .loss }
+        case .open:
+            list = list.filter { $0.status == .open }
+        }
+        
+        if !q.isEmpty {
+            list = list.filter {
+                $0.symbol.lowercased().contains(q) ||
+                $0.tags.contains(where: { $0.lowercased().contains(q) }) ||
+                ($0.notes?.lowercased().contains(q) ?? false)
+            }
+        }
+        
+        let sorted = list.sorted { $0.openedAt > $1.openedAt }
+        cache.lastFilterKey = key
+        cache.lastFilteredTrades = sorted
+        return sorted
+    }
+    
+    private var overviewMetrics: TradeMetrics {
+        let key = "\(dataStore.selectedTimeRange.rawValue)_\(dataStore.selectedAccountId)_\(dataStore.filteredTrades.count)_\(dataStore.cacheVersion)"
+        if cache.lastMetricsKey == key, let m = cache.lastMetrics {
+            return m
+        }
+        let fresh = FinancialMetricsEngine.computeMetrics(
+            trades: scopedTrades,
+            timeZone: env.currentTimeZone
+        )
+        cache.lastMetricsKey = key
+        cache.lastMetrics = fresh
+        return fresh
+    }
+    
+    public var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                summaryCardsGrid
+                searchAndStatusFilter
+                tradesListContent
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 88)
+        }
+        .refreshable {
+            await Task {
+                await dataStore.performGlobalSync()
+            }.value
+        }
+        .background(AppColors.background)
+        .sheet(isPresented: $showAddTradeSheet) {
+            AddTradeSheet()
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .sheet(isPresented: $showPreTradeSheet) {
+            PreTradeAnalysisSheet()
+        }
+        .sheet(item: $selectedTrade) { trade in
+            TradeDetailView(trade: trade, isModal: true)
+                .id(trade.key)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .sheet(item: $tradeForAICoach) { trade in
+            TradeAICoachSheet(trade: trade)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .onReceive(env.$requestAddTrade) { requested in
+            if requested {
+                env.requestAddTrade = false
+                showAddTradeSheet = true
+            }
+        }
+    }
+    
+    // MARK: - Helpers
+    
+    private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .appCardStyle(cornerRadius: 16)
+    }
+    
+    @ViewBuilder
+    private var summaryCardsGrid: some View {
+        let isProfit = overviewMetrics.netPnl >= 0
+        let pnlColor = isProfit ? AppColors.profit : AppColors.loss
+        let pfStr = overviewMetrics.profitFactorIsInfinite ? "∞" : (overviewMetrics.profitFactor.map { Formatters.formatDecimal(Decimal($0), maxDecimals: 2) } ?? "–")
+        let winRateStr = overviewMetrics.winRate.map { Formatters.formatPercent($0) } ?? "–"
+        let avgWlStr = overviewMetrics.avgWinLossRatio.map { Formatters.formatDecimal(Decimal($0), maxDecimals: 2) } ?? "–"
+        
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+            cardContainer {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("NET CUMULATIVE P&L")
+                        .font(AppTypography.cardHeaderUppercase)
+                        .foregroundColor(AppColors.secondaryText)
+                        .tracking(0.5)
+                        .lineLimit(1)
+                    
+                    AppMonetaryText(
+                        Formatters.formatPnL(overviewMetrics.netPnl, currency: env.currentCurrency),
+                        isPrivate: env.isPrivacyModeEnabled,
+                        font: AppTypography.displayMajor,
+                        color: pnlColor
+                    )
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    
+                    HStack(spacing: 4) {
+                        Text("\(overviewMetrics.closedTrades) closed")
+                        Text("·")
+                        Text("Fees \(Formatters.formatCurrency(overviewMetrics.fees ?? 0, currency: env.currentCurrency))")
+                    }
+                    .font(AppTypography.captionMicro)
+                    .monospacedDigit()
+                    .foregroundColor(AppColors.secondaryText)
+                    .lineLimit(1)
+                }
+            }
+            
+            cardContainer {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("PROFIT FACTOR")
+                        .font(AppTypography.cardHeaderUppercase)
+                        .foregroundColor(AppColors.secondaryText)
+                        .tracking(0.5)
+                        .lineLimit(1)
+                    
+                    Text(pfStr)
+                        .font(AppTypography.displayMajor)
+                        .monospacedDigit()
+                        .foregroundColor(AppColors.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    
+                    Text("Payoff efficiency")
+                        .font(AppTypography.captionMicro)
+                        .foregroundColor(AppColors.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+            
+            cardContainer {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("TRADE WIN %")
+                        .font(AppTypography.cardHeaderUppercase)
+                        .foregroundColor(AppColors.secondaryText)
+                        .tracking(0.5)
+                        .lineLimit(1)
+                    
+                    Text(winRateStr)
+                        .font(AppTypography.displayMajor)
+                        .monospacedDigit()
+                        .foregroundColor(AppColors.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    
+                    Text("\(overviewMetrics.winningTrades)W · \(overviewMetrics.losingTrades)L")
+                        .font(AppTypography.captionMicro)
+                        .monospacedDigit()
+                        .foregroundColor(AppColors.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+            
+            cardContainer {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("AVG WIN / LOSS")
+                        .font(AppTypography.cardHeaderUppercase)
+                        .foregroundColor(AppColors.secondaryText)
+                        .tracking(0.5)
+                        .lineLimit(1)
+                    
+                    Text(avgWlStr)
+                        .font(AppTypography.displayMajor)
+                        .monospacedDigit()
+                        .foregroundColor(AppColors.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    
+                    Text("Expectancy multiple")
+                        .font(AppTypography.captionMicro)
+                        .foregroundColor(AppColors.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var searchAndStatusFilter: some View {
+        AppSegmentedBar(
+            selection: $statusFilter,
+            items: TradeStatusFilter.allCases,
+            titleFor: { $0.rawValue },
+            height: 34
+        )
+        .padding(.vertical, 2)
+    }
+    
+    @ViewBuilder
+    private var tradesListContent: some View {
+        if filteredTrades.isEmpty {
+            cardContainer {
+                AppEmptyState(
+                    icon: "line.3.horizontal.decrease.circle",
+                    title: "No trades match these filters",
+                    message: "Try clearing your search query or selecting a broader range.",
+                    iconColor: AppColors.secondaryText,
+                    actionTitle: dataStore.trades.isEmpty ? "Log Trade" : "Clear Filters",
+                    actionIcon: dataStore.trades.isEmpty ? "plus" : "xmark.circle",
+                    isInCard: true
+                ) {
+                    if dataStore.trades.isEmpty {
+                        showAddTradeSheet = true
+                    } else {
+                        searchText = ""
+                        env.searchQuery = ""
+                        statusFilter = .all
+                        dataStore.selectedTimeRange = .all
+                    }
+                }
+            }
+        } else {
+            let playbookMap: [String: String] = {
+                var map: [String: String] = [:]
+                for p in dataStore.playbooks {
+                    map[p.id] = p.name
+                }
+                return map
+            }()
+            LazyVStack(spacing: 10) {
+                ForEach(filteredTrades) { trade in
+                    let isTradeOpen = trade.status == .open
+                    let pName = trade.playbookId.flatMap { playbookMap[$0] ?? $0 }
+                    TradeTerminalRow(trade: trade, playbookName: pName)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            NativeHaptics.lightImpact()
+                            selectedTrade = trade
+                        }
+                    .contextMenu {
+                        Button {
+                            tradeForAICoach = trade
+                        } label: {
+                            Label(isTradeOpen ? "Live Position Coach" : "Post-Trade AI Audit", systemImage: isTradeOpen ? "bolt.fill" : "sparkles")
+                        }
+                        Button(role: .destructive) {
+                            withAnimation(AppAnimations.springStandard) {
+                                dataStore.deleteTrade(key: trade.key)
+                            }
+                        } label: {
+                            Label("Delete Trade", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct TradeTerminalRow: View {
+    @EnvironmentObject private var env: AppEnvironment
+    let trade: Trade
+    let playbookName: String?
+    
+    private var durationText: String? {
+        if let dur = trade.durationMs, dur > 0 {
+            let minutes = dur / 60_000
+            if minutes < 60 {
+                return "\(minutes)m"
+            } else {
+                let hours = minutes / 60
+                let remMin = minutes % 60
+                return remMin > 0 ? "\(hours)h \(remMin)m" : "\(hours)h"
+            }
+        }
+        if let closed = trade.closedAt {
+            let diff = Int(closed.timeIntervalSince(trade.openedAt) / 60)
+            if diff > 0 {
+                if diff < 60 { return "\(diff)m" }
+                return "\(diff / 60)h \(diff % 60)m"
+            }
+        }
+        return trade.status == .open ? "Holding" : nil
+    }
+    
+    private var dateDisplay: String {
+        let d = trade.closedAt ?? trade.openedAt
+        let time = Formatters.formatTime(d)
+        let date = Formatters.dateOnly(d, timeZone: env.currentTimeZone)
+        return "\(time) · \(date)"
+    }
+    
+    private var rMultiple: Double? {
+        TradeAnalysisEngine.tradeR(trade: trade)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            topLineView
+            Divider().background(AppColors.border.opacity(0.35))
+            middleLineView
+            bottomLineView
+        }
+        .appCardStyle(cornerRadius: 16)
+    }
+    
+    @ViewBuilder
+    private var topLineView: some View {
+        HStack(alignment: .center, spacing: 8) {
+            // Symbol + Direction pill
+            HStack(spacing: 6) {
+                Text(trade.symbol)
+                    .font(AppTypography.rowPrimary)
+                    .foregroundColor(AppColors.primaryText)
+                    .lineLimit(1)
+                
+                AppBadge(
+                    trade.direction == .long ? "LONG" : "SHORT",
+                    variant: trade.direction == .long ? .brand : .warning
+                )
+                
+                AppBadge(
+                    trade.status.rawValue.uppercased(),
+                    color: Formatters.statusColor(trade.status)
+                )
+                
+                if trade.status == .open && trade.isPartiallyClosed {
+                    AppBadge("PARTIAL", variant: .warning)
+                }
+            }
+            
+            Spacer(minLength: 4)
+            
+            // Net PnL (prominent)
+            VStack(alignment: .trailing, spacing: 1) {
+                AppMonetaryText(
+                    Formatters.formatPnL(trade.netPnl, currency: env.currentCurrency),
+                    isPrivate: env.isPrivacyModeEnabled,
+                    font: AppTypography.displayMedium,
+                    color: trade.netPnl >= 0 ? AppColors.profit : AppColors.loss
+                )
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                
+                if trade.status == .open && trade.isPartiallyClosed {
+                    Text("Realized")
+                        .font(AppTypography.captionMicro)
+                        .foregroundColor(AppColors.secondaryText)
+                } else if let r = rMultiple {
+                    Text("\(r >= 0 ? "+" : "")\(Formatters.formatNumber(r))R")
+                        .font(AppTypography.statValueMedium)
+                        .foregroundColor(r >= 0 ? AppColors.profit : AppColors.loss)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var middleLineView: some View {
+        HStack(alignment: .center) {
+            // Entry -> Exit price path
+            HStack(spacing: 4) {
+                Text(Formatters.price(trade.avgEntry, symbol: trade.symbol))
+                    .font(AppTypography.statValueMedium)
+                    .foregroundColor(AppColors.primaryText)
+                
+                Image(systemName: "arrow.right")
+                    .font(AppTypography.captionMicro)
+                    .foregroundColor(AppColors.secondaryText.opacity(0.6))
+                
+                if let exit = trade.avgExit {
+                    Text(Formatters.price(exit, symbol: trade.symbol))
+                        .font(AppTypography.statValueMedium)
+                        .foregroundColor(AppColors.primaryText)
+                } else {
+                    Text("Active")
+                        .font(AppTypography.statValueMedium)
+                        .foregroundColor(AppColors.brand)
+                }
+            }
+            .lineLimit(1)
+            
+            Spacer(minLength: 8)
+            
+            // Volume and Duration
+            HStack(spacing: 6) {
+                if trade.isPartiallyClosed && trade.status == .open {
+                    Text("\(Formatters.formatNumber(trade.openQuantity)) / \(Formatters.formatNumber(trade.quantity)) lots")
+                        .font(AppTypography.statLabel)
+                        .foregroundColor(AppColors.secondaryText)
+                } else {
+                    Text("\(Formatters.formatNumber(trade.quantity)) lots")
+                        .font(AppTypography.statLabel)
+                        .foregroundColor(AppColors.secondaryText)
+                }
+                
+                if let dur = durationText {
+                    Text("·")
+                        .foregroundColor(AppColors.secondaryText.opacity(0.5))
+                    HStack(spacing: 2) {
+                        Image(systemName: "clock")
+                            .font(AppTypography.statLabel)
+                        Text(dur)
+                    }
+                    .font(AppTypography.statLabel)
+                    .foregroundColor(AppColors.secondaryText)
+                }
+            }
+            .lineLimit(1)
+        }
+    }
+    
+    @ViewBuilder
+    private var bottomLineView: some View {
+        HStack(alignment: .center, spacing: 6) {
+            HStack(spacing: 4) {
+                if let setup = playbookName {
+                    AppBadge(setup, icon: "bookmark.fill", variant: .brand)
+                }
+                
+                ForEach(trade.tags.prefix(2), id: \.self) { tag in
+                    AppTag(tag, color: AppColors.secondaryText, prefix: "#")
+                }
+            }
+            
+            Spacer(minLength: 6)
+            
+            Text(dateDisplay)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.secondaryText)
+                .lineLimit(1)
+        }
+    }
+}

@@ -1,0 +1,45 @@
+import SwiftUI
+
+@main
+public struct TradeJournalApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var env = AppEnvironment.shared
+    @StateObject private var dataStore = TradeDataStore.shared
+    @State private var isAppReady: Bool = false
+    
+    public init() {
+        AppNotificationManager.shared.configure()
+        Task { @MainActor in
+            AppNotificationCoordinator.shared.schedulePreSessionRoutines(timeZone: AppEnvironment.shared.currentTimeZone)
+        }
+    }
+    
+    public var body: some Scene {
+        WindowGroup {
+            ZStack {
+                RootTabView()
+                    .environmentObject(env)
+                    .environmentObject(dataStore)
+                    .preferredColorScheme(env.colorScheme)
+                
+                if !dataStore.isLoaded {
+                    SplashScreenView()
+                        .transition(.opacity)
+                        .zIndex(999)
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: dataStore.isLoaded)
+            .onChange(of: scenePhase) { newPhase in
+                if newPhase == .active {
+                    Task { @MainActor in
+                        AppNotificationCoordinator.shared.schedulePreSessionRoutines(timeZone: env.currentTimeZone)
+                        AppNotificationCoordinator.shared.scheduleDailyJournalReview(trades: dataStore.trades, timeZone: env.currentTimeZone)
+                    }
+                } else if newPhase == .background {
+                    // Safe non-blocking background save protected by iOS UIBackgroundTask
+                    dataStore.performSaveToDiskAsync(isBackgroundTrigger: true)
+                }
+            }
+        }
+    }
+}

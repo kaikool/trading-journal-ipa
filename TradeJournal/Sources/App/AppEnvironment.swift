@@ -1,0 +1,210 @@
+import SwiftUI
+import Combine
+
+/// Manages application-wide environment state and theme configuration.
+public enum AppTheme: String, CaseIterable, Identifiable {
+    case dark = "Dark"
+    case light = "Light"
+    case system = "System"
+    
+    public var id: String { rawValue }
+}
+
+@MainActor
+public final class AppEnvironment: ObservableObject {
+    public static let shared = AppEnvironment()
+    
+    @Published public var selectedTab: AppTab = .dashboard
+    @Published public var isPrivacyModeEnabled: Bool = false
+    @Published public var isDrawerOpen: Bool = false
+    @Published public var currentCurrency: String = "USD"
+    @Published public var currentTimeZone: TimeZone = .current
+    @Published public var showSyncCenter: Bool = false
+    @Published public var appTheme: AppTheme {
+        didSet {
+            AppSettingsStore.shared.themePreference = appTheme.rawValue
+        }
+    }
+    @Published public var isHapticsEnabled: Bool {
+        didSet {
+            AppSettingsStore.shared.isHapticsEnabled = isHapticsEnabled
+        }
+    }
+    
+    // MARK: - Global Header Action Triggers & Search State
+    @Published public var requestNewPlaybook: Bool = false
+    @Published public var requestNewNote: Bool = false
+    @Published public var requestNewMissedTrade: Bool = false
+    @Published public var requestNewAccount: Bool = false
+    @Published public var requestNewRoutine: Bool = false
+    @Published public var requestAddTrade: Bool = false
+    @Published public var requestOpenTodayJournal: Bool = false
+    @Published public var isSearchActive: Bool = false
+    @Published public var searchQuery: String = ""
+    
+    // MARK: - Unified Cockpit Header Sub-Bar States
+    @Published public var calendarCurrentMonth: Date = Date()
+    @Published public var settingsActiveSection: SettingsSection = .general
+    @Published public var reportsActiveMode: ReportMode = .overview
+    @Published public var accountFilterTab: AccountFilterTab = .all
+    @Published public var propLedgerTab: PropLedgerTab = .accounts
+    @Published public var notebookFolderId: String? = nil
+    
+    public func changeCalendarMonth(by value: Int) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = currentTimeZone
+        if let newDate = cal.date(byAdding: .month, value: value, to: calendarCurrentMonth) {
+            calendarCurrentMonth = newDate
+        }
+    }
+    
+    // Production user identity management (isolated per device)
+    @Published public var isAuthenticated: Bool = true
+    @Published public var currentUserId: String = AppEnvironment.resolvePersistentUserId()
+    
+    private static func resolvePersistentUserId() -> String {
+        AppSettingsStore.shared.persistentUserId
+    }
+    
+    public var colorScheme: ColorScheme? {
+        switch appTheme {
+        case .system: return nil
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
+    
+    public init() {
+        let savedTheme = AppSettingsStore.shared.themePreference
+        self.appTheme = savedTheme.flatMap(AppTheme.init(rawValue:)) ?? .system
+        
+        let savedHaptics = AppSettingsStore.shared.isHapticsEnabled
+        self.isHapticsEnabled = savedHaptics
+        
+        // Auto-bootstrap any uncommitted local secrets from AppSecrets.plist to Apple Keychain
+        AppSecretsLoader.bootstrapLocalSecretsToKeychain()
+        
+        AppLogger.info("AppEnvironment initialized. PrivacyMode: \(isPrivacyModeEnabled), Currency: \(currentCurrency), Theme: \(appTheme.rawValue), Haptics: \(isHapticsEnabled)")
+    }
+    
+    public func togglePrivacyMode() {
+        isPrivacyModeEnabled.toggle()
+        AppLogger.debug("Privacy mode toggled to: \(isPrivacyModeEnabled)")
+    }
+    
+    /// Keeps the display currency aligned with the reporting currency all monetary values are
+    /// expressed in (trade P&L, balances and aggregated metrics).
+    public func applyReportingCurrency(_ currency: String) {
+        let code = currency.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty, code != currentCurrency else { return }
+        currentCurrency = code
+    }
+    
+    public func toggleTheme() {
+        switch appTheme {
+        case .system:
+            appTheme = .dark
+        case .dark:
+            appTheme = .light
+        case .light:
+            appTheme = .system
+        }
+        AppLogger.debug("Theme toggled to: \(appTheme.rawValue)")
+    }
+    
+    public func setAppTheme(_ theme: AppTheme) {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            appTheme = theme
+        }
+    }
+}
+
+/// 13 navigation sections mapped 1:1 from `source-repo/apps/web/src/components/shell.tsx`
+public enum AppTab: String, CaseIterable, Identifiable {
+    // Primary trading navigation group (NAV)
+    case dashboard = "Dashboard"
+    case calendar = "Calendar"
+    case journal = "Daily journal"
+    case trades = "Trades"
+    case reports = "Reports"
+    case propFirms = "Prop firms"
+    case notebook = "Notebook"
+    case playbooks = "Playbooks"
+    case progress = "Progress"
+    case missed = "Missed trades"
+    
+    // Configuration & setup group (NAV_SETUP)
+    case importTrades = "Import"
+    case accounts = "Accounts"
+    case settings = "Settings"
+    
+    public var id: String { rawValue }
+    
+    public var iconName: String {
+        switch self {
+        case .dashboard: return "square.grid.2x2"
+        case .calendar: return "calendar"
+        case .journal: return "book.closed"
+        case .trades: return "list.bullet.rectangle"
+        case .reports: return "chart.bar.xaxis"
+        case .propFirms: return "building.columns"
+        case .notebook: return "note.text"
+        case .playbooks: return "book"
+        case .progress: return "checklist"
+        case .missed: return "bookmark"
+        case .importTrades: return "square.and.arrow.down"
+        case .accounts: return "creditcard"
+        case .settings: return "gearshape"
+        }
+    }
+    
+    public var selectedIconName: String {
+        switch self {
+        case .dashboard: return "square.grid.2x2.fill"
+        case .calendar: return "calendar.badge.clock"
+        case .journal: return "book.closed.fill"
+        case .trades: return "list.bullet.rectangle.fill"
+        case .reports: return "chart.bar.xaxis"
+        case .propFirms: return "building.columns.fill"
+        case .notebook: return "note.text"
+        case .playbooks: return "book.fill"
+        case .progress: return "checklist.checked"
+        case .missed: return "bookmark.fill"
+        case .importTrades: return "square.and.arrow.down.fill"
+        case .accounts: return "creditcard.fill"
+        case .settings: return "gearshape.fill"
+        }
+    }
+    
+    public var isSetupSection: Bool {
+        switch self {
+        case .importTrades, .accounts, .settings: return true
+        default: return false
+        }
+    }
+    
+    // Backward compatibility alias
+    public static var analytics: AppTab { .reports }
+    
+    // MARK: - Gesture Navigation Order
+    public static let primaryTabs: [AppTab] = [.dashboard, .calendar, .journal, .trades, .reports]
+    
+    public var isPrimaryTab: Bool {
+        Self.primaryTabs.contains(self)
+    }
+    
+    public var nextPrimaryTab: AppTab? {
+        guard let idx = Self.primaryTabs.firstIndex(of: self), idx < Self.primaryTabs.count - 1 else { return nil }
+        return Self.primaryTabs[idx + 1]
+    }
+    
+    public var previousPrimaryTab: AppTab? {
+        guard let idx = Self.primaryTabs.firstIndex(of: self), idx > 0 else { return nil }
+        return Self.primaryTabs[idx - 1]
+    }
+}
+
+extension Notification.Name {
+    public static let appScrollToTop = Notification.Name("AppScrollToTopNotification")
+}
+

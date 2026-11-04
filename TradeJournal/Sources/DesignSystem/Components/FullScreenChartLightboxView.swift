@@ -1,0 +1,103 @@
+import SwiftUI
+import UIKit
+
+// MARK: - Full-Screen Chart Lightbox Viewer
+// Edge-to-edge full-screen viewer with interactive pinch-to-zoom, pan, and double-tap zoom
+public struct FullScreenChartLightboxView: View {
+    @Environment(\.dismiss) private var dismiss
+    public let image: UIImage
+    
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+    
+    public init(image: UIImage) {
+        self.image = image
+    }
+    
+    public var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            // Full-screen image with pinch & pan gestures
+            GeometryReader { geo in
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { val in
+                                let delta = val / lastScale
+                                lastScale = val
+                                let newScale = scale * delta
+                                scale = max(CGFloat(1.0), min(newScale, CGFloat(5.0)))
+                            }
+                            .onEnded { _ in
+                                lastScale = CGFloat(1.0)
+                                if scale <= CGFloat(1.0) {
+                                    withAnimation(AppAnimations.springQuick) {
+                                        scale = CGFloat(1.0)
+                                        offset = .zero
+                                    }
+                                }
+                            }
+                    )
+                    .simultaneousGesture(
+                        DragGesture()
+                            .onChanged { val in
+                                guard scale > CGFloat(1.0) else { return }
+                                offset = CGSize(
+                                    width: lastOffset.width + val.translation.width,
+                                    height: lastOffset.height + val.translation.height
+                                )
+                            }
+                            .onEnded { _ in
+                                lastOffset = offset
+                            }
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(AppAnimations.springQuick) {
+                            if scale > CGFloat(1.2) {
+                                scale = CGFloat(1.0)
+                                offset = .zero
+                                lastOffset = .zero
+                            } else {
+                                scale = CGFloat(2.5)
+                            }
+                        }
+                    }
+            }
+            .ignoresSafeArea()
+            
+            // Floating Top Controls
+            VStack {
+                HStack {
+                    AppBadge("Chart Vision", style: .brand)
+                    
+                    Spacer()
+                    
+                    ModalCloseButton {
+                        dismiss()
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                
+                Spacer()
+                
+                // Subtle zoom hint at bottom
+                if scale == 1.0 {
+                    AppBadge("Pinch or double-tap to zoom", style: .neutral)
+                        .padding(.bottom, 16)
+                }
+            }
+        }
+        #if os(iOS)
+        .statusBarHidden(true)
+        #endif
+    }
+}

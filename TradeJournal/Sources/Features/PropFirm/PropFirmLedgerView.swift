@@ -1,0 +1,300 @@
+import SwiftUI
+import Charts
+
+public enum PropLedgerTab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
+    case accounts = "Accounts"
+    case payouts = "Payouts"
+    case transactions = "Transactions"
+    
+    public var id: String { rawValue }
+}
+
+public enum PropAccountStatusFilter: String, CaseIterable, Identifiable {
+    case active = "Active"
+    case inactive = "Inactive"
+    case all = "All"
+    
+    public var id: String { rawValue }
+}
+
+public struct PropFirmLedgerView: View {
+    @ObservedObject var dataStore = TradeDataStore.shared
+    @EnvironmentObject var env: AppEnvironment
+    
+    private var selectedTab: PropLedgerTab { env.propLedgerTab }
+    @State var selectedCurrency: String = "USD"
+    @State var selectedAccountStatus: PropAccountStatusFilter = .active
+    @State var showArchivedAccounts: Bool = false
+    
+    @State var showNewAccountSheet: Bool = false
+    @State var showNewEntrySheet: Bool = false
+    @State var showAddReceiptSheet: Bool = false
+    @State var showRefundSheet: Bool = false
+    @State var showVoidAlert: Bool = false
+    @State var showCsvSheet: Bool = false
+    @State var showAuditSheet: Bool = false
+    
+    @State var selectedPayoutForReceipt: PropEntryItem? = nil
+    @State var selectedExpenseForRefund: PropEntryItem? = nil
+    @State var selectedAccountForEdit: PropAccountItem? = nil
+    @State var selectedAccountForNextPhase: PropAccountItem? = nil
+    @State var itemToVoid: (id: String, isEntry: Bool)? = nil
+    @State var voidReason: String = ""
+    
+    public init() {}
+    
+    var availableCurrencies: [String] {
+        let raw = (dataStore.propAccounts.map { $0.currency.uppercased() } + dataStore.propEntries.map { $0.currency.uppercased() })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let set = Set(raw)
+        var list = Array(set).sorted()
+        if list.isEmpty { list = ["USD"] }
+        return ["ALL"] + list
+    }
+    
+    var displayCurrency: String {
+        selectedCurrency == "ALL" ? (dataStore.currencyConversion.reportingCurrency.isEmpty ? "USD" : dataStore.currencyConversion.reportingCurrency) : selectedCurrency
+    }
+    
+    var filteredAccounts: [PropAccountItem] {
+        dataStore.propAccounts.filter { prop in
+            let statusMatch: Bool = {
+                switch selectedAccountStatus {
+                case .active:
+                    return prop.status == .active
+                case .inactive:
+                    return prop.status != .active
+                case .all:
+                    return true
+                }
+            }()
+            return (showArchivedAccounts || !prop.archived) && statusMatch
+        }
+    }
+    
+    var filteredEntries: [PropEntryItem] {
+        let sel = selectedCurrency.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return dataStore.propEntries.filter { entry in
+            let c = entry.currency.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            let matches = (sel == "ALL" || c == sel || (c.isEmpty && (sel == "USD" || sel.isEmpty)))
+            return !entry.voided && matches
+        }
+    }
+    
+    var movements: [CashMovementItem] {
+        let sel = selectedCurrency.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return PropFirmEngine.cashMovements(entries: filteredEntries, receipts: dataStore.propReceipts)
+            .filter { mov in
+                let c = mov.currency.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                return sel == "ALL" || c == sel || (c.isEmpty && (sel == "USD" || sel.isEmpty))
+            }
+    }
+    
+    var summary: CashSummaryResult {
+        (try? PropFirmEngine.cashSummary(rows: movements)) ?? CashSummaryResult(
+            spentMinor: 0, refundsMinor: 0, netSpendMinor: 0, receivedMinor: 0, netMinor: 0, roi: nil
+        )
+    }
+    
+    var timelinePoints: [CashTimelinePoint] {
+        (try? PropFirmEngine.cashTimeline(rows: movements)) ?? []
+    }
+    
+    var payoutItems: [PayoutProgressResult] {
+        let today = Formatters.isoDayString(from: Date())
+        return PropFirmEngine.payoutProgress(
+            entries: filteredEntries,
+            receipts: dataStore.propReceipts,
+            today: today
+        )
+    }
+    
+    var passRate: Double? {
+        PropFirmEngine.resolvedPhasePassRate(accounts: dataStore.propAccounts)
+    }
+    
+    public var body: some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                // Content Switcher
+                switch selectedTab {
+                case .overview:
+                    overviewView
+                case .accounts:
+                    propSubToolbar
+                    accountsListView
+                case .payouts:
+                    payoutsProgressView
+                case .transactions:
+                    propSubToolbar
+                    transactionsListView
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 88)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(AppColors.background)
+        .sheet(isPresented: $showNewAccountSheet) {
+            NewPropAccountSheet(defaultCurrency: selectedCurrency) { newAcc in
+                dataStore.savePropAccount(item: newAcc, reason: "Create new account")
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .sheet(item: $selectedAccountForNextPhase) { parentAcc in
+            NewPropAccountSheet(
+                defaultCurrency: parentAcc.currency,
+                initialFirm: parentAcc.firm,
+                initialProgram: parentAcc.program == .evaluation ? .verification : .funded,
+                initialSizeText: "\(parentAcc.sizeMinor.map { $0 / 100 } ?? (parentAcc.balanceMinor.map { $0 / 100 } ?? 0))",
+                parentId: parentAcc.id
+            ) { nextAcc in
+                dataStore.savePropAccount(item: nextAcc, reason: "Next stage / phase")
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .sheet(item: $selectedAccountForEdit) { acc in
+            EditPropAccountSheet(account: acc) { updatedAcc in
+                dataStore.savePropAccount(item: updatedAcc, reason: "Update account details")
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .sheet(isPresented: $showAuditSheet) {
+            PropAuditTrailSheet(audits: dataStore.propAudits)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .sheet(isPresented: $showNewEntrySheet) {
+            NewPropEntrySheet(accounts: filteredAccounts, defaultCurrency: selectedCurrency) { newEntry in
+                dataStore.savePropEntry(item: newEntry, reason: "Record transaction")
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .sheet(item: $selectedPayoutForReceipt) { payout in
+            AddReceiptSheet(payout: payout) { receipt in
+                try? dataStore.addPropReceipt(item: receipt, reason: "Payout receipt settlement")
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .sheet(item: $selectedExpenseForRefund) { expense in
+            AddRefundSheet(expense: expense) { refundEntry in
+                dataStore.savePropEntry(item: refundEntry, reason: "Evaluation fee refund")
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+        }
+        .sheet(isPresented: $showCsvSheet) {
+            PropCsvImportSheet()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .appTransactionActionAlert(
+            isPresented: $showVoidAlert,
+            title: "Transaction Action",
+            message: "You can void this transaction to keep it in audit history, or delete it permanently from your journal and Supabase.",
+            placeholder: "Void reason (optional)...",
+            text: $voidReason,
+            onVoid: {
+                if let target = itemToVoid {
+                    if target.isEntry {
+                        try? dataStore.voidPropEntry(id: target.id, voided: true, reason: voidReason.isEmpty ? "Void transaction" : voidReason)
+                    }
+                    itemToVoid = nil
+                    voidReason = ""
+                }
+            },
+            onDelete: {
+                if let target = itemToVoid {
+                    if target.isEntry {
+                        dataStore.deletePropEntry(id: target.id)
+                    }
+                    itemToVoid = nil
+                    voidReason = ""
+                }
+            },
+            onCancel: { itemToVoid = nil; voidReason = "" }
+        )
+        .onAppear {
+            if !availableCurrencies.contains(selectedCurrency), let first = availableCurrencies.first {
+                selectedCurrency = first
+            }
+        }
+        .onChange(of: availableCurrencies) { newCurrs in
+            if !newCurrs.contains(selectedCurrency), let first = newCurrs.first {
+                selectedCurrency = first
+            }
+        }
+    }
+    
+    // MARK: - Sub-Toolbar
+    @ViewBuilder
+    private var propSubToolbar: some View {
+        HStack(spacing: 8) {
+            if selectedTab == .accounts {
+                AppleMenuChip(title: "Status", selectionText: selectedAccountStatus.rawValue, icon: "circle.circle") {
+                    ForEach(PropAccountStatusFilter.allCases) { s in
+                        Button(s.rawValue) {
+                            NativeHaptics.selection()
+                            selectedAccountStatus = s
+                        }
+                    }
+                }
+            } else {
+                AppleMenuChip(title: "Currency", selectionText: selectedCurrency, icon: "dollarsign.circle") {
+                    ForEach(availableCurrencies, id: \.self) { c in
+                        Button(c) {
+                            NativeHaptics.selection()
+                            selectedCurrency = c
+                        }
+                    }
+                }
+            }
+            
+            Spacer()
+            
+            if selectedTab == .accounts {
+                AppFilterChip(
+                    "Archived",
+                    isSelected: showArchivedAccounts,
+                    icon: showArchivedAccounts ? "archivebox.fill" : "archivebox",
+                    height: 34
+                ) {
+                    showArchivedAccounts.toggle()
+                }
+                
+                AppActionPill("Track Account", icon: "plus") {
+                    showNewAccountSheet = true
+                }
+            } else if selectedTab == .transactions {
+                AppActionPill("Add Expense", icon: "plus") {
+                    showNewEntrySheet = true
+                }
+            } else if selectedTab == .payouts {
+                AppActionPill("Track Payout", icon: "arrow.down.left") {
+                    showNewEntrySheet = true
+                }
+            } else {
+                AppActionPill("Track Account", icon: "plus") {
+                    showNewAccountSheet = true
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
