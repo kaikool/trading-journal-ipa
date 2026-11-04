@@ -140,17 +140,13 @@ public final class MarketAlertEngine: ObservableObject, @unchecked Sendable {
     }
     
     private init() {
-        self.isEnabled = AppSettingsStore.shared.marketAlertEnabled
+        self.isEnabled = false
         
         let savedSymbols = AppSettingsStore.shared.marketAlertSymbols ?? ["XAUUSD", "EURUSD", "BTCUSD"]
         self.monitoredSymbols = savedSymbols
         
         let savedTfs = AppSettingsStore.shared.marketAlertTimeframes ?? ["15m", "1h"]
         self.monitoredTimeframes = savedTfs
-        
-        if self.isEnabled {
-            startMonitoring()
-        }
     }
     
     // MARK: - 1. Dynamic Scheduling Loop

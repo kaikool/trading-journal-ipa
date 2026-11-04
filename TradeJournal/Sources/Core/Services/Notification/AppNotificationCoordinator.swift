@@ -80,15 +80,21 @@ public final class AppNotificationCoordinator: ObservableObject {
             let country = event.country.uppercased()
             let timeStr = formatter.string(from: eventDate)
             
+            let isVi = NotificationMessageBuilder.isVietnameseActive
+            
             // 15-Minute Alert
             if AppSettingsStore.shared.notifyNews15m {
                 let alert15Date = eventDate.addingTimeInterval(-15 * 60)
                 let key15 = "news_15m_\(event.id)"
                 if alert15Date > now && !scheduledEventKeys.contains(key15) {
                     scheduledEventKeys.insert(key15)
-                    let title = "[HIGH IMPACT EVENT - \(country)]"
-                    let subtitle = "Scheduled at \(timeStr)"
-                    let body = "\(event.title) release in 15 minutes (\(timeStr)). Assess open exposure, trailing stop losses, or reduce position sizing."
+                    let (title, subtitle, body) = NotificationMessageBuilder.buildNewsAlert(
+                        currency: country,
+                        eventTitle: event.title,
+                        minutesRemaining: 15,
+                        timeString: timeStr,
+                        isVi: isVi
+                    )
                     
                     AppNotificationManager.shared.scheduleNotification(
                         id: key15,
@@ -108,9 +114,13 @@ public final class AppNotificationCoordinator: ObservableObject {
                 let key5 = "news_5m_\(event.id)"
                 if alert5Date > now && !scheduledEventKeys.contains(key5) {
                     scheduledEventKeys.insert(key5)
-                    let title = "[IMMINENT VOLATILITY - \(country)]"
-                    let subtitle = "Scheduled in 5 Minutes"
-                    let body = "\(event.title) release in 5 minutes. Expect severe slippage and spread expansion. Protect capital."
+                    let (title, subtitle, body) = NotificationMessageBuilder.buildNewsAlert(
+                        currency: country,
+                        eventTitle: event.title,
+                        minutesRemaining: 5,
+                        timeString: timeStr,
+                        isVi: isVi
+                    )
                     
                     AppNotificationManager.shared.scheduleNotification(
                         id: key5,
@@ -154,13 +164,14 @@ public final class AppNotificationCoordinator: ObservableObject {
         guard span <= 3600 else { return }
         
         lastTiltAlertTime = now
-        let minutes = max(1, Int(span / 60))
         let totalLoss = abs(recent3.reduce(Decimal(0)) { $0 + $1.netPnl })
-        let lossFormatted = Formatters.formatCurrency(totalLoss, currency: "USD")
-        
-        let title = "[DISCIPLINE BREACH WARNING]"
-        let subtitle = "3 Consecutive Losses Detected"
-        let body = "3 consecutive losses recorded within the last \(minutes) minutes (Net: -\(lossFormatted)). Execution quality is degrading. Mandatory cool-down: step away from the trading desk for 30 minutes."
+        let isVi = NotificationMessageBuilder.isVietnameseActive
+        let (title, subtitle, body) = NotificationMessageBuilder.buildTiltWarningAlert(
+            lossCount: recent3.count,
+            drawdown: totalLoss,
+            currency: "USD",
+            isVi: isVi
+        )
         
         dispatchNotificationNow(
             id: "tilt_\(Int(now.timeIntervalSince1970))",
@@ -179,16 +190,18 @@ public final class AppNotificationCoordinator: ObservableObject {
         let now = Date()
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = timeZone
+        let isVi = NotificationMessageBuilder.isVietnameseActive
         
         // Morning Routine Checklist (08:00)
         if AppSettingsStore.shared.notifyMorningRoutine {
+            let (title, subtitle, body) = NotificationMessageBuilder.buildMorningRoutineAlert(isVi: isVi)
             scheduleDailyRoutine(
                 id: "morning_routine_check",
                 hour: 8,
                 minute: 0,
-                title: "[MORNING ROUTINE CHECKLIST]",
-                subtitle: "Daily Trading Preparation",
-                body: "Review daily economic calendar, account risk limits, and define key technical watchlist zones before session opening.",
+                title: title,
+                subtitle: subtitle,
+                body: body,
                 category: .preSessionRoutine,
                 cal: cal,
                 now: now,
@@ -198,13 +211,18 @@ public final class AppNotificationCoordinator: ObservableObject {
         
         // London Session Reminder (13:45 VN / 15m before 14:00)
         if AppSettingsStore.shared.notifyPreSessionLondon {
+            let (title, subtitle, body) = NotificationMessageBuilder.buildSessionOpenAlert(
+                sessionName: "London",
+                timeString: "14:00",
+                isVi: isVi
+            )
             scheduleDailyRoutine(
                 id: "pre_session_london",
                 hour: 13,
                 minute: 45,
-                title: "[LONDON SESSION OPEN]",
-                subtitle: "Opening in 15 Minutes",
-                body: "London session opens in 15 minutes. Review key footprint POC levels, macroeconomic calendar, and pre-trade rules before placing opening orders.",
+                title: title,
+                subtitle: subtitle,
+                body: body,
                 category: .preSessionRoutine,
                 cal: cal,
                 now: now,
@@ -214,13 +232,18 @@ public final class AppNotificationCoordinator: ObservableObject {
         
         // New York Session Reminder (19:15 VN / 15m before 19:30)
         if AppSettingsStore.shared.notifyPreSessionNewYork {
+            let (title, subtitle, body) = NotificationMessageBuilder.buildSessionOpenAlert(
+                sessionName: "New York",
+                timeString: "19:30",
+                isVi: isVi
+            )
             scheduleDailyRoutine(
                 id: "pre_session_newyork",
                 hour: 19,
                 minute: 15,
-                title: "[NEW YORK SESSION OPEN]",
-                subtitle: "Opening in 15 Minutes",
-                body: "New York session opens in 15 minutes. Review key footprint POC levels, macroeconomic calendar, and pre-trade rules before placing opening orders.",
+                title: title,
+                subtitle: subtitle,
+                body: body,
                 category: .preSessionRoutine,
                 cal: cal,
                 now: now,
@@ -256,14 +279,11 @@ public final class AppNotificationCoordinator: ObservableObject {
         comps.second = 0
         guard let targetDate = cal.date(from: comps), targetDate > now else { return }
         
-        let winCount = todayTrades.filter { $0.status == .win }.count
-        let winRate = (Double(winCount) / Double(todayTrades.count)) * 100.0
-        let netPnl = todayTrades.reduce(Decimal(0)) { $0 + $1.netPnl }
-        let netPnlStr = Formatters.formatPnL(netPnl, currency: "USD")
-        
-        let title = "[END OF DAY JOURNAL REVIEW]"
-        let subtitle = "Daily Performance Summary"
-        let body = "\(todayTrades.count) closed trades recorded today (Win Rate: \(Formatters.formatPercent(winRate)) • Net: \(netPnlStr)). Complete your post-market journal entry to document execution quality and lessons."
+        let isVi = NotificationMessageBuilder.isVietnameseActive
+        let (title, subtitle, body) = NotificationMessageBuilder.buildJournalReviewAlert(
+            tradeCount: todayTrades.count,
+            isVi: isVi
+        )
         
         AppNotificationManager.shared.scheduleNotification(
             id: "daily_journal_review_today",
@@ -276,14 +296,15 @@ public final class AppNotificationCoordinator: ObservableObject {
         )
     }
     
-    // MARK: - 4. Pillar 5: Market Structure & Footprint POC Alerts
+    // MARK: - 4. Pillar 5: Footprint POC & Reaction Alerts
     
     /// Dispatches institutional Footprint POC reactions with 15-minute level debouncing.
     public func dispatchMarketStructureAlert(
         symbol: String,
         levelName: String,
         price: Decimal,
-        timeframe: String
+        timeframe: String,
+        pattern: CandlePatternType? = nil
     ) {
         guard AppSettingsStore.shared.notifyMarketStructure else { return }
         
@@ -297,10 +318,15 @@ public final class AppNotificationCoordinator: ObservableObject {
         }
         lastMarketAlertTimes[debounceKey] = now
         
-        let formattedPrice = Formatters.price(price, symbol: cleanSymbol)
-        let title = "[MARKET STRUCTURE ALERT]"
-        let subtitle = "\(cleanSymbol) (\(cleanTf))"
-        let body = "\(cleanSymbol) touched \(levelName) at \(formattedPrice) on \(cleanTf) timeframe."
+        let isVi = NotificationMessageBuilder.isVietnameseActive
+        let (title, subtitle, body) = NotificationMessageBuilder.buildPocReactionAlert(
+            symbol: cleanSymbol,
+            timeframe: cleanTf,
+            levelName: levelName,
+            price: price,
+            pattern: pattern,
+            isVi: isVi
+        )
         
         dispatchNotificationNow(
             id: "market_poc_\(Int(now.timeIntervalSince1970))_\(cleanSymbol)",
@@ -308,21 +334,13 @@ public final class AppNotificationCoordinator: ObservableObject {
             title: title,
             subtitle: subtitle,
             body: body,
-            userInfo: ["symbol": cleanSymbol, "level": levelName, "price": "\(price)"]
-        )
-    }
-    
-    // MARK: - 5. System Test Notification Dispatcher
-    
-    /// Dispatches a sample notification to verify permissions, sound, and banner presentation.
-    public func sendTestNotification() {
-        dispatchNotificationNow(
-            id: "test_\(Int(Date().timeIntervalSince1970))",
-            category: .marketStructure,
-            title: "[SYSTEM NOTIFICATION TEST]",
-            subtitle: "Alert Delivery Operational",
-            body: "Standard 27 notification dispatch verified. Alerts, sound, and deep linking are functioning normally.",
-            userInfo: ["type": "test_notification"]
+            userInfo: [
+                "symbol": cleanSymbol,
+                "level": levelName,
+                "price": "\(price)",
+                "timeframe": cleanTf,
+                "pattern": pattern?.rawValue ?? ""
+            ]
         )
     }
     
@@ -409,6 +427,18 @@ public final class AppNotificationCoordinator: ObservableObject {
     public func clearAll() {
         recentNotifications.removeAll()
         unreadCount = 0
+        saveHistory()
+    }
+    
+    public func deleteNotification(id: String) {
+        recentNotifications.removeAll { $0.id == id }
+        unreadCount = recentNotifications.filter { !$0.isRead }.count
+        saveHistory()
+    }
+    
+    public func deleteNotifications(at offsets: IndexSet) {
+        recentNotifications.remove(atOffsets: offsets)
+        unreadCount = recentNotifications.filter { !$0.isRead }.count
         saveHistory()
     }
     

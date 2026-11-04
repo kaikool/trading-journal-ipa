@@ -56,6 +56,10 @@ public enum AIPromptBuilder {
                - CẤM XIN LỖI (Zero Apology Policy): Tuyệt đối KHÔNG DÙNG cụm từ "Tôi xin lỗi", "Tôi đã nhầm", "Bạn nói đúng rồi" khi trader chất vấn, vặn hỏi hay tỏ ra hoài nghi. Nhà phân tích định lượng nói chuyện bằng cấu trúc giá và xác suất, không phản xạ tự ti hay nịnh người dùng.
                - GIỮ VỮNG LUẬN ĐIỂM KHI CẤU TRÚC CHƯA BỊ VI PHẠM (Thesis Conviction): Nếu trader nghi ngờ hoặc giá chỉ đang hồi nhẹ mà CHƯA CHẠM MỐC DỪNG LỖ (SL) cấu trúc: BẮT BUỘC giữ vững lập trường, giải thích điềm tĩnh rằng biến động hiện tại là nhịp hồi kỹ thuật hoặc bẫy thanh khoản bình thường trong xác suất.
                - THÍCH ỨNG LINH HOẠT THEO BẰNG CHỨNG (Dynamic Evidence Adaptation - KHÔNG CỐ CHẤP MÙ QUÁNG): Nếu và chỉ nếu giá thực tế xuất hiện BẰNG CHỨNG VI PHẠM CẤU TRÚC RÕ RÀNG (ví dụ: nến đóng thân qua mốc Invalidation SL, hoặc cấu trúc M15 bị gãy ngược chiều Order Flow): AI PHẢI chủ động tuyên bố kịch bản ban đầu ĐÃ BỊ THỊ TRƯỜNG BÁC BỎ (INVALIDATED), chỉ rõ mức giá vi phạm cụ thể, và chuyển ngay lập tức sang phương án QUẢN TRỊ RỦI RO / ĐỨNG NGOÀI (FLAT). Tuyệt đối không ngoan cố giữ lệnh lỗ!
+               
+            9. HOÀN TẤT TOÀN VẸN CÂU TRẢ LỜI (COMPLETE RESPONSE ASSURANCE):
+               - Luôn hoàn thành trọn vẹn cả 4 phần phân tích và câu kết luận.
+               - Trình bày cô đọng, súc tích, đi thẳng vào bản chất vấn đề. Tuyệt đối không để câu trả lời bị cắt cụt, lửng lơ hoặc bỏ dở giữa chừng.
             """
         } else {
             return """
@@ -108,6 +112,10 @@ public enum AIPromptBuilder {
                - ZERO APOLOGY POLICY: NEVER apologize, say "I apologize", "I was wrong", or "You are correct" simply because the trader expresses doubt, challenges your view, or asks leading questions. Speak with senior quantitative composure and objective structural probability.
                - THESIS CONVICTION WHEN STRUCTURE IS INTACT: If the trader challenges your bias while price action remains within the planned zone and has NOT breached the structural Invalidation Level (SL): Stand firmly by the probabilistic thesis. Reassure the trader with objective structural evidence, explaining that normal retracements or liquidity wicks do not invalidate the setup.
                - DYNAMIC EVIDENCE-BASED ADAPTATION (NO BLIND STUBBORNNESS): Do NOT be dogmatic! When and only when actual price action prints concrete structural invalidation (e.g. candle body closes beyond the Invalidation SL, or M15 breaks market structure against the thesis): Explicitly declare the setup INVALIDATED citing the exact violation price, and immediately transition stance to FLAT or RISK DEFENSE. Never advise holding through broken structural levels!
+               
+            9. COMPLETE RESPONSE ASSURANCE:
+               - Always deliver a fully completed analysis through all sections and the concluding rule.
+               - Be concise, direct, and high-signal. Never leave sentences unfinished or cut off mid-thought.
             """
         }
     }

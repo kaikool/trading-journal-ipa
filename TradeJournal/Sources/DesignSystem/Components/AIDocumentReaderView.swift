@@ -46,11 +46,21 @@ public enum AIDocumentParser {
             
             // 1. Skip code fence blocks (```json ... ``` or ``` ... ```)
             if trimmed.hasPrefix("```") {
+                let startIndex = i
                 i += 1
-                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                var foundClosing = false
+                while i < lines.count {
+                    if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        foundClosing = true
+                        i += 1
+                        break
+                    }
                     i += 1
                 }
-                if i < lines.count { i += 1 }
+                // If no closing code fence was found, restore index so remaining text is never truncated
+                if !foundClosing {
+                    i = startIndex + 1
+                }
                 continue
             }
             

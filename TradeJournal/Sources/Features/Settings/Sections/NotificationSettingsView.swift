@@ -11,7 +11,7 @@ public struct NotificationSettingsView: View {
     @State private var notifyPreSessionLondon: Bool = AppSettingsStore.shared.notifyPreSessionLondon
     @State private var notifyPreSessionNewYork: Bool = AppSettingsStore.shared.notifyPreSessionNewYork
     @State private var notifyDailyJournalReview: Bool = AppSettingsStore.shared.notifyDailyJournalReview
-    @State private var notifyMarketStructure: Bool = AppSettingsStore.shared.notifyMarketStructure
+    @State private var notifyFootprintPoc: Bool = AppSettingsStore.shared.notifyMarketStructure
     
     public init() {}
     
@@ -69,7 +69,7 @@ public struct NotificationSettingsView: View {
                 }
             }
             
-            // MARK: - 3. Pillar 4: Psychology & Daily Routine
+            // MARK: - 2. Pillar 4: Psychology & Daily Routine
             SettingsCard(
                 title: "Psychology & Session Routines",
                 footer: "Enforces strict trading discipline and consistent journaling habits."
@@ -130,16 +130,16 @@ public struct NotificationSettingsView: View {
                 }
             }
             
-            // MARK: - 4. Pillar 5: Market Structure & Footprint POC Alerts
+            // MARK: - 3. Pillar 5: Footprint POC & Candlestick Pattern Alerts
             SettingsCard(
-                title: "Market Structure & Footprint Alerts",
-                footer: "Alerts on price action reactions around key institutional volume levels."
+                title: "Footprint POC Reactions",
+                footer: "Alerts when price tests or rejects Key Footprint POCs with candlestick pattern confirmation."
             ) {
                 AppToggleRow(
-                    "Key Footprint POC Touches",
-                    subtitle: "Alerts when price touches Naked POC or Daily POC",
+                    "Footprint POC & Rejection Alerts",
+                    subtitle: "Alerts on POC touches, Pinbars, and Engulfing patterns across any timeframe",
                     icon: "chart.bar.xaxis",
-                    isOn: $notifyMarketStructure
+                    isOn: $notifyFootprintPoc
                 ) { val in
                     AppSettingsStore.shared.notifyMarketStructure = val
                 }

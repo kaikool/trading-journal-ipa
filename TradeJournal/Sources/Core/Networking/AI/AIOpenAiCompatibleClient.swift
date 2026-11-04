@@ -166,7 +166,7 @@ extension AIReflectionService {
             "temperature": 0.1
         ]
         
-        // Intelligent token boundaries to guarantee requests NEVER breach Groq's strict 7,000 TPM limit
+        // Robust token allocations to guarantee full, complete responses without truncation
         if isGroq {
             var totalChars = 0
             for msg in apiMessages {
@@ -181,21 +181,14 @@ extension AIReflectionService {
                 }
             }
             
-            // Conservative token estimation (~3.2 chars per token for multilingual content)
             let estimatedPromptTokens = Int(Double(totalChars) / 3.2)
-            
-            // Groq free tier rejects ANY request where (prompt_tokens + max_tokens) > 7,000.
-            // We budget a maximum combined footprint of 5,800 tokens to ensure absolute safety.
-            let safeCeiling = 5800
-            let availableOutputTokens = max(350, safeCeiling - estimatedPromptTokens)
-            
-            if model.contains("qwen3.8-27b") {
-                let cap = action == .critique ? 1500 : 900
-                payload["max_tokens"] = min(cap, availableOutputTokens)
-            } else {
-                let defaultCap = action == .critique ? 1400 : 1600
-                payload["max_tokens"] = min(defaultCap, availableOutputTokens)
-            }
+            // Groq free tier limit is 8,000 to 30,000 TPM; provide generous 2,500 token completion budget
+            let safeCeiling = 7500
+            let availableOutputTokens = max(1800, safeCeiling - estimatedPromptTokens)
+            payload["max_tokens"] = min(2500, availableOutputTokens)
+        } else {
+            // For Gemini, OpenRouter, and OpenAI, provide generous 4,096 tokens so detailed analyses are never cut off
+            payload["max_tokens"] = 4096
         }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
