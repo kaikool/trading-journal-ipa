@@ -44,7 +44,7 @@ public final class AppEnvironment: ObservableObject {
     
     // MARK: - Unified Cockpit Header Sub-Bar States
     @Published public var calendarCurrentMonth: Date = Date()
-    @Published public var settingsActiveSection: SettingsSection = .general
+    @Published public var settingsActiveSection: SettingsSection = .preferences
     @Published public var reportsActiveMode: ReportMode = .overview
     @Published public var accountFilterTab: AccountFilterTab = .all
     @Published public var propLedgerTab: PropLedgerTab = .accounts

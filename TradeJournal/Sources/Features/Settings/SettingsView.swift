@@ -3,63 +3,38 @@ import SwiftUI
 import UIKit
 #endif
 
-// MARK: - 7 Canonical Settings Sections (1:1 port from apps/web/src/app/settings/page.tsx)
+// MARK: - 3 Canonical Grouped Settings Sections
 public enum SettingsSection: String, CaseIterable, Identifiable {
-    case general = "general"
-    case trading = "trading"
-    case currencyConversion = "currency-conversion"
-    case marketData = "market-data"
-    case connections = "the5ers"
-    case notifications = "notifications"
-    case aiSettings = "ai-settings"
-    case yourData = "your-data"
+    case preferences = "preferences"
+    case connections = "connections"
+    case aiAndData = "ai-data"
     
     public var id: String { rawValue }
     
     public var label: String {
         switch self {
-        case .general: return "General"
-        case .trading: return "Trading"
-        case .currencyConversion: return "Currency conversion"
-        case .marketData: return "Market data"
+        case .preferences: return "Preferences"
         case .connections: return "Connections"
-        case .notifications: return "Notifications"
-        case .aiSettings: return "AI"
-        case .yourData: return "Data & backups"
+        case .aiAndData: return "AI & Data"
         }
     }
     
     public var iconName: String {
         switch self {
-        case .general: return "globe"
-        case .trading: return "slider.horizontal.3"
-        case .currencyConversion: return "arrow.left.arrow.right"
-        case .marketData: return "chart.xyaxis.line"
-        case .connections: return "link"
-        case .notifications: return "bell.badge"
-        case .aiSettings: return "sparkles"
-        case .yourData: return "cylinder.split.1x2"
+        case .preferences: return "slider.horizontal.3"
+        case .connections: return "antenna.radiowaves.left.and.right"
+        case .aiAndData: return "sparkles"
         }
     }
     
     public var description: String {
         switch self {
-        case .general:
-            return "Choose the timezones used to display and import your trades."
-        case .trading:
-            return "Manage contract multipliers, breakeven rules, fees, and risk defaults."
-        case .currencyConversion:
-            return "Set a reporting currency and saved exchange rates for combined performance."
-        case .marketData:
-            return "Connect price history and market data feeds for replay and trade analysis."
+        case .preferences:
+            return "Theme appearance, timezones, economic news radar, and discipline routines."
         case .connections:
-            return "Connect broker APIs, cTrader accounts, and prop firm feeds."
-        case .notifications:
-            return "Configure economic news alerts, discipline triggers, and session routines."
-        case .aiSettings:
-            return "Configure AI provider, language, and trader profile rules."
-        case .yourData:
-            return "Manage cloud sync, export backups, and local storage."
+            return "Broker accounts, The5ers prop firm sync, and OANDA market data feeds."
+        case .aiAndData:
+            return "AI trading coach configuration, Supabase cloud sync, backups, and storage."
         }
     }
 }
@@ -74,27 +49,17 @@ public struct SettingsView: View {
     
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Active Section Content directly below the sliding bar
-                Group {
-                    switch activeSection {
-                    case .general:
-                        GeneralSettingsView()
-                    case .trading:
-                        TradingSettingsView()
-                    case .currencyConversion:
-                        CurrencyConversionSettingsView()
-                    case .marketData:
-                        MarketDataSettingsView()
-                    case .connections:
-                        ConnectionsSettingsView()
-                    case .notifications:
-                        NotificationSettingsView()
-                    case .aiSettings:
-                        AiSettingsView()
-                    case .yourData:
-                        YourDataSettingsView()
-                    }
+            VStack(alignment: .leading, spacing: 18) {
+                switch activeSection {
+                case .preferences:
+                    GeneralSettingsView()
+                    NotificationSettingsView()
+                case .connections:
+                    ConnectionsSettingsView()
+                    MarketDataSettingsView()
+                case .aiAndData:
+                    AiSettingsView()
+                    YourDataSettingsView()
                 }
             }
             .padding(.horizontal, 16)

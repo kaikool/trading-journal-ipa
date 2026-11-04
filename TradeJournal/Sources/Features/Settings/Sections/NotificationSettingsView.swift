@@ -2,9 +2,6 @@ import SwiftUI
 
 // MARK: - Standard 27: Unified Notification & Alerting Settings View
 public struct NotificationSettingsView: View {
-    @ObservedObject private var manager = AppNotificationManager.shared
-    @ObservedObject private var coordinator = AppNotificationCoordinator.shared
-    
     @State private var notifyHighImpactNews: Bool = AppSettingsStore.shared.notifyHighImpactNews
     @State private var notifyNews15m: Bool = AppSettingsStore.shared.notifyNews15m
     @State private var notifyNews5m: Bool = AppSettingsStore.shared.notifyNews5m
@@ -16,68 +13,11 @@ public struct NotificationSettingsView: View {
     @State private var notifyDailyJournalReview: Bool = AppSettingsStore.shared.notifyDailyJournalReview
     @State private var notifyMarketStructure: Bool = AppSettingsStore.shared.notifyMarketStructure
     
-    @State private var testStatusMessage: String = ""
-    
     public init() {}
     
     public var body: some View {
         VStack(spacing: 16) {
-            // MARK: - 1. System Permission & Test Diagnostics
-            SettingsCard(
-                title: "System Delivery & Status",
-                footer: "Notifications are delivered locally on device with zero telemetry or third-party tracking."
-            ) {
-                VStack(spacing: 12) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Delivery Status")
-                                .font(AppTypography.rowPrimary)
-                                .foregroundColor(AppColors.primaryText)
-                            Text(manager.isAuthorized ? "Active • Ready to deliver alerts" : "Disabled • Grant system permissions")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.secondaryText)
-                        }
-                        Spacer()
-                        AppBadge(
-                            manager.isAuthorized ? "Authorized" : "Disabled",
-                            style: manager.isAuthorized ? .profit : .neutral
-                        )
-                    }
-                    
-                    Divider().background(AppColors.border.opacity(0.4))
-                    
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Diagnostics Test")
-                                .font(AppTypography.rowPrimary)
-                                .foregroundColor(AppColors.primaryText)
-                            Text("Verifies alert sounds, banners, and routing")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.secondaryText)
-                        }
-                        Spacer()
-                        AppButton(
-                            "Send Test Alert",
-                            icon: "paperplane",
-                            style: .secondary,
-                            size: .compact
-                        ) {
-                            triggerTestAlert()
-                        }
-                    }
-                    
-                    if !testStatusMessage.isEmpty {
-                        HStack {
-                            Text(testStatusMessage)
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.profit)
-                            Spacer()
-                        }
-                    }
-                }
-            }
-            
-            // MARK: - 2. Pillar 3: Economic News Radar (Forex Factory)
+            // MARK: - 1. Pillar 3: Economic News Radar (Forex Factory)
             SettingsCard(
                 title: "Economic News Radar",
                 footer: "Monitors Forex Factory high-impact events and warns before volatility surges."
@@ -204,22 +144,6 @@ public struct NotificationSettingsView: View {
                     AppSettingsStore.shared.notifyMarketStructure = val
                 }
             }
-        }
-        .onAppear {
-            Task {
-                await manager.refreshAuthorizationStatus()
-            }
-        }
-    }
-    
-    private func triggerTestAlert() {
-        Task {
-            if !manager.isAuthorized {
-                _ = await manager.requestAuthorization()
-            }
-            coordinator.sendTestNotification()
-            NativeHaptics.success()
-            testStatusMessage = "Test alert dispatched to iOS notification queue."
         }
     }
 }

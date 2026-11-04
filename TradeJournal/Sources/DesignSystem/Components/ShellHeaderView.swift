@@ -218,7 +218,7 @@ public struct ShellHeaderView: View {
             items: SettingsSection.allCases,
             titleFor: { $0.label },
             iconFor: { $0.iconName },
-            isScrollable: true
+            isScrollable: false
         )
         .padding(.horizontal, 14)
         .padding(.bottom, 8)
