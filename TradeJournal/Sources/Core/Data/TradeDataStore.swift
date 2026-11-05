@@ -26,7 +26,10 @@ public final class TradeDataStore: ObservableObject {
         didSet { invalidatePerformanceCaches() }
     }
     @Published public var trades: [Trade] = [] {
-        didSet { invalidatePerformanceCaches() }
+        didSet {
+            invalidatePerformanceCaches()
+            scheduleNotificationChecksDebounced()
+        }
     }
     @Published public var selectedAccountId: String = "default-acc" {
         didSet { invalidatePerformanceCaches() }
@@ -110,13 +113,27 @@ public final class TradeDataStore: ObservableObject {
         playbooksStore.playbookAssessments = playbookAssessments
         playbooksStore.progressRules = progressRules
         playbooksStore.progressChecks = progressChecks
-        
-        // Standard 27: Evaluate Discipline (Tilt) and Schedule Daily Journal Review
-        AppNotificationCoordinator.shared.evaluateTiltAndRevengeTrading(trades: trades)
-        AppNotificationCoordinator.shared.scheduleDailyJournalReview(
-            trades: trades,
-            timeZone: AppEnvironment.shared.currentTimeZone
-        )
+    }
+
+    private var notificationDebounceTask: Task<Void, Never>? = nil
+
+    /// Asynchronously schedules notifications in the background off the Main Thread.
+    /// Debounced to ensure zero UI hitches during rapid trade operations or filter changes.
+    private func scheduleNotificationChecksDebounced() {
+        notificationDebounceTask?.cancel()
+        notificationDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled, let self = self else { return }
+            let tradesSnapshot = self.trades
+            let tz = AppEnvironment.shared.currentTimeZone
+            Task.detached(priority: .utility) {
+                AppNotificationCoordinator.shared.evaluateTiltAndRevengeTrading(trades: tradesSnapshot)
+                AppNotificationCoordinator.shared.scheduleDailyJournalReview(
+                    trades: tradesSnapshot,
+                    timeZone: tz
+                )
+            }
+        }
     }
     
     internal var persistenceUrl: URL {

@@ -173,6 +173,7 @@ extension SharedChartCanvas {
     private static func filteredTradingViewProfiles(
         _ sessionProfiles: [SessionProfileSnapshot]
     ) -> [(snap: SessionProfileSnapshot, tag: String)] {
+        guard !sessionProfiles.isEmpty else { return [] }
         let daily = sessionProfiles.filter { $0.sessionType == .daily }.sorted { $0.startTime > $1.startTime }
         let weekly = sessionProfiles.filter { $0.sessionType == .weekly }.sorted { $0.startTime > $1.startTime }
         let tokyo = sessionProfiles.filter { $0.sessionType == .tokyo }.sorted { $0.startTime > $1.startTime }
@@ -227,7 +228,12 @@ extension SharedChartCanvas {
                 let isD1orW1 = snap.sessionType == .daily || snap.sessionType == .weekly
                 let lineWidth: CGFloat = isD1orW1 ? 2.0 : 1.2
 
-                let sessionBars = bars.filter { $0.date >= snap.startTime && $0.date <= snap.endTime }
+                let sessionBars: [MarketBar]
+                if let sI = startIdx, let eI = endIdx, sI <= eI {
+                    sessionBars = Array(bars[sI...eI])
+                } else {
+                    sessionBars = bars.filter { $0.date >= snap.startTime && $0.date <= snap.endTime }
+                }
                 if sessionBars.count >= 2 {
                     let steps = SessionFootprintEngine.computeStaircaseSteps(bars: sessionBars, symbol: symbol)
                     let staircase = buildStaircasePath(

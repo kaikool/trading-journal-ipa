@@ -26,6 +26,11 @@ public struct CandleChartView: View {
     public let onInteractionChanged: ((Bool) -> Void)?
     @State private var activeRSIMAType: MomentumEngine.RSIMAType
     @State private var viewport = ChartViewportState()
+    @State private var cachedRsiSeries: [Double?] = []
+    @State private var cachedRsiEma9Series: [Double?] = []
+    @State private var cachedRsiWma45Series: [Double?] = []
+    @State private var lastComputedBarsCount: Int = 0
+    @State private var lastComputedLastTimestamp: Int64 = 0
 
     private var defaultVisibleBars: Int {
         min(max(visibleBars.count, 10), isLandscape ? 64 : 42)
@@ -96,12 +101,14 @@ public struct CandleChartView: View {
                         .onAppear {
                             viewport.currentPlotWidth = plotW
                             viewport.currentPlotHeight = plotH
+                            recomputeIndicatorsIfNeeded()
                             if !viewport.didInitializeViewport && !visibleBars.isEmpty {
                                 viewport.didInitializeViewport = true
                                 viewport.resetViewport(barsCount: visibleBars.count, plotWidth: plotW, defaultVisibleBars: defaultVisibleBars)
                             }
                         }
                         .onChange(of: visibleBars.count) { _ in
+                            recomputeIndicatorsIfNeeded()
                             if !visibleBars.isEmpty {
                                 viewport.resetViewport(barsCount: visibleBars.count, plotWidth: viewport.currentPlotWidth, defaultVisibleBars: defaultVisibleBars)
                             }
@@ -422,30 +429,69 @@ public struct CandleChartView: View {
         }
     }
 
-    // MARK: - 4. RSI Sub-Window View & Plot
+    // MARK: - 4. RSI Sub-Window View & Plot (Memoized 120fps Pipeline)
+    private func recomputeIndicatorsIfNeeded() {
+        let reference = allBars.isEmpty ? visibleBars : allBars
+        guard !reference.isEmpty else {
+            cachedRsiSeries = []
+            cachedRsiEma9Series = []
+            cachedRsiWma45Series = []
+            return
+        }
+        let count = reference.count
+        let lastTs = reference.last?.timestamp ?? 0
+        if count == lastComputedBarsCount && lastTs == lastComputedLastTimestamp && !cachedRsiSeries.isEmpty {
+            return
+        }
+        lastComputedBarsCount = count
+        lastComputedLastTimestamp = lastTs
+        let rsi = MomentumEngine.computeRSISeries(bars: reference, period: 14)
+        cachedRsiSeries = rsi
+        cachedRsiEma9Series = MomentumEngine.computeEMA(series: rsi, period: 9)
+        cachedRsiWma45Series = MomentumEngine.computeWMA(series: rsi, period: 45)
+    }
+
     private var rsiSeries: [Double?] {
+        if !cachedRsiSeries.isEmpty {
+            return cachedRsiSeries
+        }
         let reference = allBars.isEmpty ? visibleBars : allBars
         return MomentumEngine.computeRSISeries(bars: reference, period: 14)
     }
 
     private var visibleRsi: [Double?] {
-        Array(rsiSeries.prefix(visibleBars.count))
+        if !cachedRsiSeries.isEmpty {
+            return Array(cachedRsiSeries.prefix(visibleBars.count))
+        }
+        return Array(rsiSeries.prefix(visibleBars.count))
     }
 
     private var rsiEma9Series: [Double?] {
-        MomentumEngine.computeEMA(series: rsiSeries, period: 9)
+        if !cachedRsiEma9Series.isEmpty {
+            return cachedRsiEma9Series
+        }
+        return MomentumEngine.computeEMA(series: rsiSeries, period: 9)
     }
 
     private var visibleRsiEma9: [Double?] {
-        Array(rsiEma9Series.prefix(visibleBars.count))
+        if !cachedRsiEma9Series.isEmpty {
+            return Array(cachedRsiEma9Series.prefix(visibleBars.count))
+        }
+        return Array(rsiEma9Series.prefix(visibleBars.count))
     }
 
     private var rsiWma45Series: [Double?] {
-        MomentumEngine.computeWMA(series: rsiSeries, period: 45)
+        if !cachedRsiWma45Series.isEmpty {
+            return cachedRsiWma45Series
+        }
+        return MomentumEngine.computeWMA(series: rsiSeries, period: 45)
     }
 
     private var visibleRsiWma45: [Double?] {
-        Array(rsiWma45Series.prefix(visibleBars.count))
+        if !cachedRsiWma45Series.isEmpty {
+            return Array(cachedRsiWma45Series.prefix(visibleBars.count))
+        }
+        return Array(rsiWma45Series.prefix(visibleBars.count))
     }
 
     private func rsiPlotView(size: CGSize, stepX: CGFloat, panOffset: CGFloat = 0) -> some View {

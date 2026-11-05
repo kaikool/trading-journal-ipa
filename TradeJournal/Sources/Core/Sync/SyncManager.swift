@@ -138,7 +138,6 @@ public final class SyncManager: ObservableObject {
                 await MainActor.run {
                     TradeDataStore.shared.invalidatePerformanceCaches()
                     TradeDataStore.shared.performSaveToDiskAsync()
-                    TradeDataStore.shared.objectWillChange.send()
                 }
             }
         }
@@ -219,7 +218,6 @@ public final class SyncManager: ObservableObject {
         self.currentProgress = "Initializing synchronization..."
         TradeDataStore.shared.isSyncing = true
         TradeDataStore.shared.lastSyncError = nil
-        TradeDataStore.shared.lastSyncSummary = self.currentProgress
         
         defer {
             self.isSyncing = false
@@ -252,7 +250,6 @@ public final class SyncManager: ObservableObject {
             }
             
             self.currentProgress = "Syncing with \(provider.displayName)..."
-            TradeDataStore.shared.lastSyncSummary = self.currentProgress
             
             do {
                 let res = try await provider.performSync(options: options) { [weak self] update in
@@ -300,7 +297,6 @@ public final class SyncManager: ObservableObject {
             }
             
             self.currentProgress = "Backing up to Supabase Cloud Database..."
-            TradeDataStore.shared.lastSyncSummary = self.currentProgress
             
             do {
                 let cloudRes = try await supabaseProvider.performSync(options: options) { [weak self] update in

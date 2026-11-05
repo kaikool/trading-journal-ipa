@@ -82,11 +82,17 @@ public struct ChartViewportState {
         let startIdx = max(0, min(bars.count - 1, Int(floor(leftX / stepX))))
         let endIdx = max(startIdx, min(bars.count - 1, Int(ceil(rightX / stepX))))
 
-        let slice = bars[startIdx...endIdx]
-        let lows = slice.map { ($0.low as NSDecimalNumber).doubleValue }
-        let highs = slice.map { ($0.high as NSDecimalNumber).doubleValue }
-        let minVal = lows.min() ?? 1.0
-        let maxVal = highs.max() ?? 2.0
+        var minVal = Double.greatestFiniteMagnitude
+        var maxVal = -Double.greatestFiniteMagnitude
+        for idx in startIdx...endIdx {
+            let b = bars[idx]
+            let lowD = NSDecimalNumber(decimal: b.low).doubleValue
+            let highD = NSDecimalNumber(decimal: b.high).doubleValue
+            if lowD < minVal { minVal = lowD }
+            if highD > maxVal { maxVal = highD }
+        }
+        if minVal == Double.greatestFiniteMagnitude { minVal = 1.0 }
+        if maxVal == -Double.greatestFiniteMagnitude { maxVal = 2.0 }
         let rawSpan = max(0.0001, maxVal - minVal)
         let pad = rawSpan * 0.08
         return (minP: minVal - pad, maxP: maxVal + pad)
