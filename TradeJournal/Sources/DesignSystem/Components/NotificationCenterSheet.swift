@@ -78,7 +78,7 @@ public struct NotificationCenterSheet: View {
             message: "Are you sure you want to remove all alerts from your history? This action cannot be undone.",
             confirmTitle: "Clear All",
             isDestructive: true,
-            action: {
+            onConfirm: {
                 NativeHaptics.mediumImpact()
                 withAnimation(AppAnimations.springStandard) {
                     coordinator.clearAll()
@@ -101,8 +101,8 @@ public struct NotificationCenterSheet: View {
                 return count > 0 ? "\(cat.rawValue) (\(count))" : cat.rawValue
             },
             iconFor: { $0.iconName },
-            height: 32,
-            isScrollable: true
+            isScrollable: true,
+            height: 32
         )
     }
     
