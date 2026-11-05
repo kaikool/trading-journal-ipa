@@ -124,15 +124,11 @@ public final class TradeDataStore: ObservableObject {
         notificationDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             guard !Task.isCancelled, let self = self else { return }
-            let tradesSnapshot = self.trades
-            let tz = AppEnvironment.shared.currentTimeZone
-            Task.detached(priority: .utility) {
-                AppNotificationCoordinator.shared.evaluateTiltAndRevengeTrading(trades: tradesSnapshot)
-                AppNotificationCoordinator.shared.scheduleDailyJournalReview(
-                    trades: tradesSnapshot,
-                    timeZone: tz
-                )
-            }
+            AppNotificationCoordinator.shared.evaluateTiltAndRevengeTrading(trades: self.trades)
+            AppNotificationCoordinator.shared.scheduleDailyJournalReview(
+                trades: self.trades,
+                timeZone: AppEnvironment.shared.currentTimeZone
+            )
         }
     }
     
